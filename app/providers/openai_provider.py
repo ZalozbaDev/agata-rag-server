@@ -12,8 +12,7 @@ class OpenAIEmbeddingProvider:
         if not settings.openai_api_key:
             raise ValueError('OPENAI_API_KEY fehlt.')
         self._client = AsyncOpenAI(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
+            api_key=settings.openai_api_key
         )
         self._model = settings.openai_embedding_model
 
@@ -34,8 +33,7 @@ class OpenAILLMProvider:
         if not settings.openai_api_key:
             raise ValueError('OPENAI_API_KEY fehlt.')
         self._client = AsyncOpenAI(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
+            api_key=settings.openai_api_key
         )
         self._model = settings.openai_chat_model
 

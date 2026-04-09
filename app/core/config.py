@@ -29,7 +29,6 @@ class Settings(BaseSettings):
     llm_provider: Literal['openai'] = 'openai'
     embedding_provider: Literal['openai'] = 'openai'
     openai_api_key: str | None = None
-    openai_base_url: str | None = None
     openai_chat_model: str = 'gpt-5-mini'
     openai_embedding_model: str = 'text-embedding-3-small'
 
