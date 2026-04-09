@@ -90,7 +90,6 @@ async def _parse_html_request(request: Request) -> tuple[str, str | None, int, s
 
 
 @router.post('/parseHtml', response_model=list[ParsedSection])
-@router.post('/parse_html', response_model=list[ParsedSection])
 async def parse_html(
     request: Request,
     container: ServiceContainer = Depends(get_container),
@@ -112,32 +111,6 @@ async def parse_html(
             source_url=source_url,
         )
 
-    return sections
-
-
-@router.get('/parse', response_model=list[ParsedSection])
-@router.get('/parseUrl', response_model=list[ParsedSection])
-async def parse_url_get(
-    url: str = Query(...),
-    min_chars: int = Query(default=40, ge=0),
-    store_in_db: bool = Query(default=False),
-    container: ServiceContainer = Depends(get_container),
-) -> list[ParsedSection]:
-    try:
-        sections = await container.parser_service.parse_url(url, min_chars=min_chars)
-    except InvalidUrlError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except FetchError as exc:
-        status = 504 if exc.is_timeout else 502
-        raise HTTPException(status_code=status, detail=str(exc)) from exc
-
-    if store_in_db:
-        await container.indexing_service.store_sections(
-            source_id=f'url:{url}',
-            source_type='url',
-            sections=sections,
-            source_url=url,
-        )
     return sections
 
 

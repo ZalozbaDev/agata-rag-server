@@ -6,7 +6,6 @@ Dieses Projekt ist ein **Grundgerüst** für einen Python-Server mit:
 - `POST /parseUrl`
 - `POST /ask`
 - optionales Flag `store_in_db` für `parseHtml` und `parseUrl`
-- zusätzlichen Alias-Endpunkten `GET /parse` und `POST /parse_html`
 - Vektor-Datenbank mit **Qdrant**
 - täglichem Re-Parsing echter Live-URLs
 - Docker / Docker Compose
@@ -35,14 +34,6 @@ Dein hochgeladenes Parser-Set ist bereits eingebunden unter:
 Der Adapter `app/parsers/adapters.py` wählt anhand von `url`, `source_url`, Dateiname oder Pfad automatisch den passenden Parser aus. Wenn kein spezifischer Parser passt, wird auf den generischen `parse_function(...)` zurückgefallen.
 
 ## Endpunkte
-
-### `GET /parse`
-
-Kompatibel zu deinem bisherigen Flask-Endpoint.
-
-```bash
-curl "http://localhost:8000/parse?url=https://example.com&min_chars=40&store_in_db=true"
-```
 
 ### `POST /parseUrl`
 
@@ -89,8 +80,6 @@ curl -X POST http://localhost:8000/parseHtml   -H "Content-Type: application/jso
         "store_in_db":true
       }'
 ```
-
-Zusätzlich existiert der Alias `POST /parse_html`, damit dein bisheriges Request-Format weiter nutzbar bleibt.
 
 ### `POST /ask`
 
