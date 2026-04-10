@@ -19,7 +19,6 @@ class AskRequest(BaseModel):
 
 
 class AskSource(BaseModel):
-    source_id: str
     source_type: str
     source_url: str = Field(default='')
     title: str = Field(default='')
@@ -28,6 +27,7 @@ class AskSource(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     sources: list[AskSource] = Field(default_factory=list)
+    source_strategy: str = Field(default='rag')
 
 
 class ParseResponse(BaseModel):

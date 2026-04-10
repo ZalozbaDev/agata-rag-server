@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.clients.qdrant_client import QdrantGateway
 from app.core.config import Settings
 from app.providers.openai_provider import OpenAIEmbeddingProvider, OpenAILLMProvider
+from app.providers.sotra_provider import SotraProvider
 from app.services.indexing_service import IndexingService
 from app.services.parser_service import ParserService
 from app.services.rag_service import RagService
@@ -17,6 +18,7 @@ class ServiceContainer:
         self.qdrant = QdrantGateway(settings)
         self.embeddings = OpenAIEmbeddingProvider(settings)
         self.llm = OpenAILLMProvider(settings)
+        self.sotra = SotraProvider(settings)
         self.chunker = Chunker(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
@@ -34,8 +36,11 @@ class ServiceContainer:
         self.rag_service = RagService(
             retrieval=self.retrieval_service,
             llm=self.llm,
+            sotra=self.sotra,
             top_k=settings.retrieval_top_k,
             max_context_chunks=settings.max_context_chunks,
+            retrieval_min_score=settings.retrieval_min_score,
+            min_rag_hits=settings.min_rag_hits,
         )
         self.scheduler = ReparseScheduler(
             parser_service=self.parser_service,

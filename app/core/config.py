@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,21 +29,25 @@ class Settings(BaseSettings):
     llm_provider: Literal['openai'] = 'openai'
     embedding_provider: Literal['openai'] = 'openai'
     openai_api_key: str | None = None
+    openai_base_url: str | None = None
     openai_chat_model: str = 'gpt-5-mini'
     openai_embedding_model: str = 'text-embedding-3-small'
 
     retrieval_top_k: int = 6
+    retrieval_min_score: float = 0.55
+    min_rag_hits: int = 1
+
+    sotra_api_key: str | None = None
+    sotra_url: str | None = None
+    sotra_timeout_seconds: float = 30.0    
+
     chunk_size: int = 1200
     chunk_overlap: int = 150
     max_context_chunks: int = 8
 
     scheduler_enabled: bool = True
     scheduler_interval_hours: int = 24
-    reparse_urls: list[str] = Field(
-        default_factory=lambda: [
-        "https://serbske-nowiny.de",
-        "https://wosada-ralbicy.de",
-    ])
+    reparse_urls: list[str] = Field(default_factory=list)
 
     cors_origins: list[str] = Field(default_factory=lambda: ['*'])
     cors_allow_credentials: bool = False

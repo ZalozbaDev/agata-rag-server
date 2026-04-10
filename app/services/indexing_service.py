@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import UUID
 
 from qdrant_client import models
 
@@ -9,7 +10,6 @@ from app.models.schemas import ParsedSection
 from app.providers.openai_provider import OpenAIEmbeddingProvider
 from app.utils.chunking import Chunker
 from app.utils.hashing import stable_sha256
-from uuid import UUID
 
 class IndexingService:
     def __init__(
@@ -42,8 +42,11 @@ class IndexingService:
 
         points: list[models.PointStruct] = []
         for chunk, vector in zip(chunks, vectors, strict=True):
-            raw_hash = stable_sha256(f"{source_id}|{chunk['section_idx']}|{chunk['chunk_idx']}|{chunk['text']}") 
+            raw_hash = stable_sha256(
+                f"{source_id}|{chunk['section_idx']}|{chunk['chunk_idx']}|{chunk['text']}"
+            )
             chunk_id = str(UUID(raw_hash[:32]))
+
             payload = {
                 'source_id': source_id,
                 'source_type': source_type,
@@ -54,6 +57,7 @@ class IndexingService:
                 'chunk_idx': chunk['chunk_idx'],
                 'indexed_at': now,
             }
+
             points.append(
                 models.PointStruct(
                     id=chunk_id,

@@ -19,7 +19,7 @@ class RetrievalService:
 
         return [
             {
-                'score': hit.score,
+                'score': float(hit.score),
                 'payload': hit.payload or {},
             }
             for hit in hits
