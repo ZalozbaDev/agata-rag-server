@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
 class ParsedSection(BaseModel):
@@ -15,7 +15,11 @@ class ParseUrlRequest(BaseModel):
 
 
 class AskRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     question: str = Field(min_length=1)
+    history: list[str] = Field(default_factory=list)
+    is_phone_call: bool = Field(default=False, alias='isPhoneCall')
 
 
 class AskSource(BaseModel):

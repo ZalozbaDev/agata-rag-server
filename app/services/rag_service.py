@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from time import perf_counter
 
@@ -31,7 +32,13 @@ class RagService:
         self.retrieval_min_score = retrieval_min_score
         self.min_rag_hits = min_rag_hits
 
-    async def answer(self, question_hsb: str) -> AskResponse:
+    async def answer(
+        self,
+        question_hsb: str,
+        history: list[str] | None = None,
+        is_phone_call: bool = False,
+    ) -> AskResponse:
+        history_items = history or []
         request_started = perf_counter()
 
         local_db_search_started = perf_counter()
@@ -79,17 +86,25 @@ class RagService:
 
             if sorbian_contexts:
                 translation_started = perf_counter()
-                question_de = await self.sotra.translate_hsb_to_de(question_hsb)
-                context_de = [
-                    await self.sotra.translate_hsb_to_de(context)
-                    for context in sorbian_contexts
-                ]
+
+                translated_parts = await asyncio.gather(
+                    self.sotra.translate_hsb_to_de(question_hsb),
+                    *[
+                        self.sotra.translate_hsb_to_de(context)
+                        for context in sorbian_contexts
+                    ],
+                )
+
+                question_de = translated_parts[0]
+                context_de = translated_parts[1:]
                 translation_ms = (perf_counter() - translation_started) * 1000
 
                 openai_started = perf_counter()
                 answer_de = await self.llm.answer_question(
                     question=question_de,
                     contexts=context_de,
+                    history=history_items,
+                    is_phone_call=is_phone_call,
                 )
                 openai_query_ms = (perf_counter() - openai_started) * 1000
 
@@ -99,7 +114,7 @@ class RagService:
 
                 total_ms = (perf_counter() - request_started) * 1000
                 logger.info(
-                    'ask timing | strategy=rag | total=%.0fms | db=%.0fms | tr=%.0fms | openai=%.0fms | back_tr=%.0fms | hits=%d/%d',
+                    'ask timing | strategy=rag | total=%.0fms | db=%.0fms | tr=%.0fms | openai=%.0fms | back_tr=%.0fms | hits=%d/%d | history_items=%d',
                     total_ms,
                     local_db_search_ms,
                     translation_ms,
@@ -107,6 +122,7 @@ class RagService:
                     back_translation_ms,
                     len(strong_hits),
                     len(results),
+                    len(history_items),
                 )
 
                 return AskResponse(
@@ -120,7 +136,12 @@ class RagService:
         translation_ms = (perf_counter() - translation_started) * 1000
 
         openai_started = perf_counter()
-        web_result = await self.llm.answer_with_web_search(question_de)
+   
+        web_result = await self.llm.answer_with_web_search(
+            question_de,
+            history=history_items,
+            is_phone_call=is_phone_call,
+        )
         openai_query_ms = (perf_counter() - openai_started) * 1000
 
         back_translation_started = perf_counter()
@@ -129,7 +150,7 @@ class RagService:
 
         total_ms = (perf_counter() - request_started) * 1000
         logger.info(
-            'ask timing | strategy=web | total=%.0fms | db=%.0fms | tr=%.0fms | openai=%.0fms | back_tr=%.0fms | hits=%d/%d',
+            'ask timing | strategy=web | total=%.0fms | db=%.0fms | tr=%.0fms | openai=%.0fms | back_tr=%.0fms | hits=%d/%d | history_items=%d',
             total_ms,
             local_db_search_ms,
             translation_ms,
@@ -137,6 +158,7 @@ class RagService:
             back_translation_ms,
             len(strong_hits),
             len(results),
+            len(history_items),
         )
 
         return AskResponse(

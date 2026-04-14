@@ -83,10 +83,17 @@ curl -X POST http://localhost:8000/parseHtml   -H "Content-Type: application/jso
 
 ### `POST /ask`
 
-JSON-Body mit Frage.
+JSON-Body mit Frage, optionalem Verlauf und Telefonat-Flag.
 
 ```bash
-curl -X POST http://localhost:8000/ask   -H "Content-Type: application/json"   -d '{"question":"Worum geht es in den Dokumenten?"}'
+curl -X POST http://localhost:8000/ask   -H "Content-Type: application/json"   -d '{
+  "question":"Worum geht es in den Dokumenten?",
+  "history":[
+    "user: Hallo Agata",
+    "assistant: Hallo! Wie kann ich helfen?"
+  ],
+  "isPhoneCall": false
+}'
 ```
 
 Antwort:

@@ -144,4 +144,8 @@ async def ask(
     request: AskRequest,
     container: ServiceContainer = Depends(get_container),
 ) -> AskResponse:
-    return await container.rag_service.answer(request.question)
+    return await container.rag_service.answer(
+        request.question,
+        history=request.history,
+        is_phone_call=request.is_phone_call,
+    )
