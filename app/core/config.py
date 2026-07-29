@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     log_level: str = 'INFO'
     api_prefix: str = ''
 
-    qdrant_url: str = 'http://qdrant:6333'
+    qdrant_url: str = 'http://agata-qdrant:6333'
     qdrant_api_key: str | None = None
     qdrant_collection: str = 'documents'
     qdrant_timeout_seconds: float = 20.0
