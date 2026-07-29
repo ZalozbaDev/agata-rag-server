@@ -15,6 +15,7 @@ dependencies = [
   'httpx',
   'lxml',
   'beautifulsoup4',
+  'pymupdf',
   'pytest',
 ]
 
