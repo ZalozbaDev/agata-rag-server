@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import httpx
-from openai import APIConnectionError, APITimeoutError, APIStatusError, AsyncOpenAI, RateLimitError
-
-from app.core.config import Settings
-from app.core.errors import OpenAIServiceError, SotraServiceError
-from app.utils.retry import retry_async
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 
-def _is_transient_openai_error(exc: Exception) -> bool:
+def is_transient_openai_error(exc: Exception) -> bool:
     if isinstance(exc, (APITimeoutError, APIConnectionError, RateLimitError)):
         return True
     if isinstance(exc, APIStatusError):
@@ -16,7 +12,7 @@ def _is_transient_openai_error(exc: Exception) -> bool:
     return False
 
 
-def _is_transient_http_error(exc: Exception) -> bool:
+def is_transient_http_error(exc: Exception) -> bool:
     if isinstance(exc, httpx.TimeoutException):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
@@ -24,3 +20,7 @@ def _is_transient_http_error(exc: Exception) -> bool:
     if isinstance(exc, httpx.TransportError):
         return True
     return False
+
+
+def is_timeout_error(exc: Exception) -> bool:
+    return 'timeout' in str(exc).lower()

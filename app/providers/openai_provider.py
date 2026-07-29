@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, TypedDict, TypeVar
 
 from openai import AsyncOpenAI
 
 from app.core.config import Settings
 from app.core.errors import OpenAIServiceError
-from app.providers._provider_utils import _is_transient_openai_error
+from app.providers._provider_utils import is_timeout_error, is_transient_openai_error
 from app.utils.retry import retry_async
 
+T = TypeVar('T')
+PromptMode = Literal['rag', 'web']
 
 PHONE_CALL_SYSTEM_ADDON = (
     '\n\nWICHTIG (Telefonat): Halte die Antwort extrem kurz (max. 2 kurze Sätze). '
@@ -22,12 +25,65 @@ MAX_HISTORY_MESSAGE_CHARS = 700
 MAX_HISTORY_TOTAL_CHARS = 3000
 
 
+class WebSource(TypedDict):
+    source_type: str
+    source_url: str
+    title: str
+
+
+class WebSearchResult(TypedDict):
+    answer: str
+    sources: list[WebSource]
+
+
+class ChatMessage(TypedDict):
+    role: str
+    content: str
+
+
 def _today_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
-def _build_system_prompt(*, is_phone_call: bool, mode: str) -> str:
-    base_prompt = (
+def _create_async_client(settings: Settings) -> AsyncOpenAI:
+    client_kwargs: dict[str, Any] = {
+        'api_key': settings.openai_api_key,
+        'timeout': settings.openai_timeout_seconds,
+    }
+    if settings.openai_base_url:
+        client_kwargs['base_url'] = settings.openai_base_url
+    return AsyncOpenAI(**client_kwargs)
+
+
+async def _run_with_openai_retry(
+    call: Callable[[], Awaitable[T]],
+    *,
+    max_retries: int,
+    retry_base_delay: float,
+    error_message: str,
+) -> T:
+    try:
+        return await retry_async(
+            call,
+            max_attempts=max_retries,
+            base_delay=retry_base_delay,
+            retryable=is_transient_openai_error,
+        )
+    except Exception as exc:
+        raise OpenAIServiceError(
+            f'{error_message}: {exc}',
+            is_timeout=is_timeout_error(exc),
+        ) from exc
+
+
+def _require_api_key(settings: Settings) -> None:
+    if not settings.openai_api_key:
+        raise ValueError('OPENAI_API_KEY fehlt.')
+
+
+def _build_system_prompt(*, is_phone_call: bool, mode: PromptMode) -> str:
+    """Persona + mode-specific grounding; phone mode always appends brevity rules."""
+    prompt = (
         f'Heutiges Datum: {_today_iso()}. '
         'Du bist Agata, eine freundliche und neugierige sorbische Frau, '
         'die seit dem 18.07.2025 im Web ist. '
@@ -47,7 +103,7 @@ def _build_system_prompt(*, is_phone_call: bool, mode: str) -> str:
     )
 
     if mode == 'rag':
-        grounding_rules = (
+        prompt += (
             '\n\nFür diese Anfrage gelten zwingende Regeln:\n'
             '- Nutze ausschließlich den bereitgestellten Kontext.\n'
             '- Erfinde keine Fakten, Namen, Daten, Orte, Zahlen oder URLs.\n'
@@ -55,33 +111,31 @@ def _build_system_prompt(*, is_phone_call: bool, mode: str) -> str:
             'dass die Datenbasis nicht ausreicht.\n'
             '- Wenn du unsicher bist, sage das offen und bleibe bei dem, was im Kontext steht.\n'
             '- Der Kontext kann aus dem Obersorbischen stammen; verstehe ihn sachlich, '
-            'antworte aber auf Deutsch.'
+            'antworte aber auf Deutsch.\n'
+            + (
+                '- Halte die Antwort sehr kurz.'
+                if is_phone_call
+                else '- Antworte vollständig, verständlich und nicht unnötig kurz.'
+            )
         )
-        if is_phone_call:
-            base_prompt += grounding_rules + '\n- Halte die Antwort sehr kurz.'
-        else:
-            base_prompt += (
-                grounding_rules
-                + '\n- Antworte vollständig, verständlich und nicht unnötig kurz.'
-            )
     elif mode == 'web':
-        if is_phone_call:
-            base_prompt += (
-                '\n\nFür diese Anfrage gilt: Nutze Websuche für aktuelle Informationen. '
-                'Antworte sehr kurz, sachlich und auf Deutsch. Erfinde keine Fakten.'
-            )
-        else:
-            base_prompt += (
-                '\n\nFür diese Anfrage gilt: Nutze Websuche für aktuelle Informationen. '
+        length_hint = (
+            'Antworte sehr kurz, sachlich und auf Deutsch.'
+            if is_phone_call
+            else (
                 'Antworte sachlich, verständlich und auf Deutsch. '
-                'Die Antwort soll hilfreich sein und nicht unnötig kurz ausfallen. '
-                'Erfinde keine Fakten.'
+                'Die Antwort soll hilfreich sein und nicht unnötig kurz ausfallen.'
             )
+        )
+        prompt += (
+            f'\n\nFür diese Anfrage gilt: Nutze Websuche für aktuelle Informationen. '
+            f'{length_hint} Erfinde keine Fakten.'
+        )
 
     if is_phone_call:
-        base_prompt += PHONE_CALL_SYSTEM_ADDON
+        prompt += PHONE_CALL_SYSTEM_ADDON
 
-    return base_prompt
+    return prompt
 
 
 def _normalize_history_text(text: str) -> str:
@@ -91,54 +145,54 @@ def _normalize_history_text(text: str) -> str:
     return normalized[: MAX_HISTORY_MESSAGE_CHARS - 1].rstrip() + '…'
 
 
+def _parse_history_item(raw_text: str) -> ChatMessage | None:
+    role = 'user'
+    content = raw_text
+
+    if ':' in raw_text:
+        prefix, maybe_content = raw_text.split(':', 1)
+        normalized_role = prefix.strip().lower()
+        stripped_content = maybe_content.strip()
+        if normalized_role in {'user', 'assistant'} and stripped_content:
+            role = normalized_role
+            content = stripped_content
+
+    content = _normalize_history_text(content)
+    if not content:
+        return None
+    return {'role': role, 'content': content}
+
+
 def _history_messages(
     history: Sequence[str] | None,
     *,
     is_phone_call: bool,
-) -> list[dict[str, str]]:
-    messages: list[dict[str, str]] = []
+) -> list[ChatMessage]:
+    """Cap history by item count and total chars so phone calls stay within context budget."""
     max_items = PHONE_HISTORY_MAX_ITEMS if is_phone_call else DEFAULT_HISTORY_MAX_ITEMS
-
-    trimmed_history = list(history or [])[-max_items:]
+    messages: list[ChatMessage] = []
     total_chars = 0
 
-    for item in trimmed_history:
+    for item in list(history or [])[-max_items:]:
         raw_text = str(item).strip()
         if not raw_text:
             continue
 
-        role = 'user'
-        content = raw_text
-
-        if ':' in raw_text:
-            prefix, maybe_content = raw_text.split(':', 1)
-            normalized_role = prefix.strip().lower()
-            stripped_content = maybe_content.strip()
-
-            if normalized_role in {'user', 'assistant'} and stripped_content:
-                role = normalized_role
-                content = stripped_content
-
-        content = _normalize_history_text(content)
-        if not content:
+        message = _parse_history_item(raw_text)
+        if message is None:
             continue
 
-        projected_total = total_chars + len(content)
+        projected_total = total_chars + len(message['content'])
         if projected_total > MAX_HISTORY_TOTAL_CHARS:
             break
 
-        messages.append(
-            {
-                'role': role,
-                'content': content,
-            }
-        )
+        messages.append(message)
         total_chars = projected_total
 
     return messages
 
 
-def _build_history_guard_message(*, is_phone_call: bool, mode: str) -> str:
+def _build_history_guard_message(*, is_phone_call: bool, mode: PromptMode) -> str:
     if is_phone_call:
         return (
             'Nutze die bisherige Unterhaltung nur als Hintergrund für Bezüge wie Namen, '
@@ -161,9 +215,10 @@ def _build_history_guard_message(*, is_phone_call: bool, mode: str) -> str:
 
 
 def _format_numbered_contexts(contexts: Sequence[str]) -> str:
-    blocks: list[str] = []
-    for index, context in enumerate(contexts, start=1):
-        blocks.append(f'[Kontext {index}]\n{context.strip()}')
+    blocks = [
+        f'[Kontext {index}]\n{context.strip()}'
+        for index, context in enumerate(contexts, start=1)
+    ]
     return '\n\n'.join(blocks)
 
 
@@ -181,19 +236,93 @@ def _to_plain_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _dedupe_sources_by_url(sources: Sequence[WebSource]) -> list[WebSource]:
+    deduped: list[WebSource] = []
+    seen_urls: set[str] = set()
+    for source in sources:
+        url = source['source_url']
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        deduped.append(source)
+    return deduped
+
+
+def _extract_web_sources(response: Any) -> list[WebSource]:
+    """Pull URLs from OpenAI web_search_call items; SDK shapes vary between versions."""
+    sources: list[WebSource] = []
+    output_items = getattr(response, 'output', None) or []
+
+    for item in output_items:
+        item_dict = _to_plain_dict(item)
+        item_type = str(item_dict.get('type') or getattr(item, 'type', '')).strip()
+        if item_type != 'web_search_call':
+            continue
+
+        action_dict = _to_plain_dict(item_dict.get('action'))
+        raw_sources = action_dict.get('sources')
+        if raw_sources is None and hasattr(item, 'action'):
+            raw_sources = getattr(item.action, 'sources', None)
+
+        for src in raw_sources or []:
+            src_dict = _to_plain_dict(src)
+            url = str(src_dict.get('url', '')).strip()
+            if not url:
+                continue
+            sources.append(
+                {
+                    'source_type': 'web',
+                    'source_url': url,
+                    'title': str(src_dict.get('title', '')).strip(),
+                }
+            )
+
+    return _dedupe_sources_by_url(sources)
+
+
+def _build_rag_user_prompt(question: str, contexts: Sequence[str], *, is_phone_call: bool) -> str:
+    prompt = (
+        f'Frage:\n{question.strip()}\n\n'
+        f'Kontext:\n{_format_numbered_contexts(contexts)}\n\n'
+        'Beantworte die Frage ausschließlich mit Hilfe der nummerierten Kontextblöcke.\n'
+        '- Erfinde keine Informationen, die nicht im Kontext stehen.\n'
+        '- Wenn der Kontext nicht ausreicht, sage klar: "Die Datenbasis reicht nicht aus."\n'
+        '- Nenne keine Quellen oder URLs, die nicht im Kontext vorkommen.\n'
+        '- Antworte auf Deutsch.'
+    )
+    if not is_phone_call:
+        prompt += '\n- Die Antwort soll verständlich und nicht unnötig kurz sein.'
+    return prompt
+
+
+def _chat_input(
+    *,
+    is_phone_call: bool,
+    mode: PromptMode,
+    history: Sequence[str] | None,
+    user_content: str,
+) -> list[dict[str, str]]:
+    return [
+        {
+            'role': 'system',
+            'content': _build_system_prompt(is_phone_call=is_phone_call, mode=mode),
+        },
+        *_history_messages(history, is_phone_call=is_phone_call),
+        {
+            'role': 'system',
+            'content': _build_history_guard_message(is_phone_call=is_phone_call, mode=mode),
+        },
+        {
+            'role': 'user',
+            'content': user_content,
+        },
+    ]
+
+
 class OpenAIEmbeddingProvider:
     def __init__(self, settings: Settings) -> None:
-        if not settings.openai_api_key:
-            raise ValueError('OPENAI_API_KEY fehlt.')
-
-        client_kwargs: dict[str, Any] = {
-            'api_key': settings.openai_api_key,
-            'timeout': settings.openai_timeout_seconds,
-        }
-        if settings.openai_base_url:
-            client_kwargs['base_url'] = settings.openai_base_url
-
-        self._client = AsyncOpenAI(**client_kwargs)
+        _require_api_key(settings)
+        self._client = _create_async_client(settings)
         self._model = settings.openai_embedding_model
         self._max_retries = settings.provider_max_retries
         self._retry_base_delay = settings.provider_retry_base_delay_seconds
@@ -206,18 +335,12 @@ class OpenAIEmbeddingProvider:
             )
             return [item.embedding for item in response.data]
 
-        try:
-            return await retry_async(
-                _call,
-                max_attempts=self._max_retries,
-                base_delay=self._retry_base_delay,
-                retryable=_is_transient_openai_error,
-            )
-        except Exception as exc:
-            raise OpenAIServiceError(
-                f'OpenAI embedding request failed: {exc}',
-                is_timeout='timeout' in str(exc).lower(),
-            ) from exc
+        return await _run_with_openai_retry(
+            _call,
+            max_retries=self._max_retries,
+            retry_base_delay=self._retry_base_delay,
+            error_message='OpenAI embedding request failed',
+        )
 
     async def embed_query(self, text: str) -> list[float]:
         vectors = await self.embed_texts([text])
@@ -226,17 +349,8 @@ class OpenAIEmbeddingProvider:
 
 class OpenAILLMProvider:
     def __init__(self, settings: Settings) -> None:
-        if not settings.openai_api_key:
-            raise ValueError('OPENAI_API_KEY fehlt.')
-
-        client_kwargs: dict[str, Any] = {
-            'api_key': settings.openai_api_key,
-            'timeout': settings.openai_timeout_seconds,
-        }
-        if settings.openai_base_url:
-            client_kwargs['base_url'] = settings.openai_base_url
-
-        self._client = AsyncOpenAI(**client_kwargs)
+        _require_api_key(settings)
+        self._client = _create_async_client(settings)
         self._model = settings.openai_chat_model
         self._max_retries = settings.provider_max_retries
         self._retry_base_delay = settings.provider_retry_base_delay_seconds
@@ -248,76 +362,43 @@ class OpenAILLMProvider:
         history: Sequence[str] | None = None,
         is_phone_call: bool = False,
     ) -> str:
-        history_messages = _history_messages(
-            history,
-            is_phone_call=is_phone_call,
-        )
-
-        context_block = _format_numbered_contexts(contexts)
-        openai_input = (
-            f'Frage:\n{question.strip()}\n\n'
-            f'Kontext:\n{context_block}\n\n'
-            'Beantworte die Frage ausschließlich mit Hilfe der nummerierten Kontextblöcke.\n'
-            '- Erfinde keine Informationen, die nicht im Kontext stehen.\n'
-            '- Wenn der Kontext nicht ausreicht, sage klar: "Die Datenbasis reicht nicht aus."\n'
-            '- Nenne keine Quellen oder URLs, die nicht im Kontext vorkommen.\n'
-            '- Antworte auf Deutsch.'
-        )
-        if not is_phone_call:
-            openai_input += '\n- Die Antwort soll verständlich und nicht unnötig kurz sein.'
-
         async def _call() -> str:
             response = await self._client.responses.create(
                 model=self._model,
-                input=[
-                    {
-                        'role': 'system',
-                        'content': _build_system_prompt(
-                            is_phone_call=is_phone_call,
-                            mode='rag',
-                        ),
-                    },
-                    *history_messages,
-                    {
-                        'role': 'system',
-                        'content': _build_history_guard_message(
-                            is_phone_call=is_phone_call,
-                            mode='rag',
-                        ),
-                    },
-                    {
-                        'role': 'user',
-                        'content': openai_input,
-                    },
-                ],
+                input=_chat_input(
+                    is_phone_call=is_phone_call,
+                    mode='rag',
+                    history=history,
+                    user_content=_build_rag_user_prompt(
+                        question,
+                        contexts,
+                        is_phone_call=is_phone_call,
+                    ),
+                ),
             )
             return response.output_text.strip()
 
-        try:
-            return await retry_async(
-                _call,
-                max_attempts=self._max_retries,
-                base_delay=self._retry_base_delay,
-                retryable=_is_transient_openai_error,
-            )
-        except Exception as exc:
-            raise OpenAIServiceError(
-                f'OpenAI chat request failed: {exc}',
-                is_timeout='timeout' in str(exc).lower(),
-            ) from exc
+        return await _run_with_openai_retry(
+            _call,
+            max_retries=self._max_retries,
+            retry_base_delay=self._retry_base_delay,
+            error_message='OpenAI chat request failed',
+        )
 
     async def answer_with_web_search(
         self,
         question: str,
         history: Sequence[str] | None = None,
         is_phone_call: bool = False,
-    ) -> dict[str, object]:
-        history_messages = _history_messages(
-            history,
-            is_phone_call=is_phone_call,
+    ) -> WebSearchResult:
+        user_content = (
+            f'{question}\n\n'
+            'Beantworte die aktuelle Frage direkt auf Deutsch. '
+            'Erfinde keine Fakten. '
+            'Bei normalen Anfragen soll die Antwort hilfreich und nicht unnötig kurz sein.'
         )
 
-        async def _call() -> dict[str, object]:
+        async def _call() -> WebSearchResult:
             response = await self._client.responses.create(
                 model=self._model,
                 tools=[
@@ -327,91 +408,21 @@ class OpenAILLMProvider:
                     }
                 ],
                 include=['web_search_call.action.sources'],
-                input=[
-                    {
-                        'role': 'system',
-                        'content': _build_system_prompt(
-                            is_phone_call=is_phone_call,
-                            mode='web',
-                        ),
-                    },
-                    *history_messages,
-                    {
-                        'role': 'system',
-                        'content': _build_history_guard_message(
-                            is_phone_call=is_phone_call,
-                            mode='web',
-                        ),
-                    },
-                    {
-                        'role': 'user',
-                        'content': (
-                            f'{question}\n\n'
-                            'Beantworte die aktuelle Frage direkt auf Deutsch. '
-                            'Erfinde keine Fakten. '
-                            'Bei normalen Anfragen soll die Antwort hilfreich und nicht unnötig kurz sein.'
-                        ),
-                    },
-                ],
+                input=_chat_input(
+                    is_phone_call=is_phone_call,
+                    mode='web',
+                    history=history,
+                    user_content=user_content,
+                ),
             )
-
-            sources: list[dict[str, str]] = []
-            output_items = getattr(response, 'output', None) or []
-
-            for item in output_items:
-                item_dict = _to_plain_dict(item)
-                item_type = str(item_dict.get('type') or getattr(item, 'type', '')).strip()
-
-                if item_type != 'web_search_call':
-                    continue
-
-                action = item_dict.get('action')
-                action_dict = _to_plain_dict(action)
-
-                raw_sources = action_dict.get('sources')
-                if raw_sources is None and hasattr(item, 'action'):
-                    raw_sources = getattr(getattr(item, 'action'), 'sources', None)
-
-                for src in raw_sources or []:
-                    src_dict = _to_plain_dict(src)
-                    url = str(src_dict.get('url', '')).strip()
-                    title = str(src_dict.get('title', '')).strip()
-
-                    if not url:
-                        continue
-
-                    sources.append(
-                        {
-                            'source_type': 'web',
-                            'source_url': url,
-                            'title': title,
-                        }
-                    )
-
-            deduped_sources: list[dict[str, str]] = []
-            seen_urls: set[str] = set()
-
-            for src in sources:
-                url = src['source_url']
-                if url in seen_urls:
-                    continue
-                seen_urls.add(url)
-                deduped_sources.append(src)
-
             return {
                 'answer': response.output_text.strip(),
-                'sources': deduped_sources,
+                'sources': _extract_web_sources(response),
             }
 
-        try:
-            return await retry_async(
-                _call,
-                max_attempts=self._max_retries,
-                base_delay=self._retry_base_delay,
-                retryable=_is_transient_openai_error,
-            )
-        except Exception as exc:
-            raise OpenAIServiceError(
-                f'OpenAI web search request failed: {exc}',
-                is_timeout='timeout' in str(exc).lower(),
-            ) from exc
+        return await _run_with_openai_retry(
+            _call,
+            max_retries=self._max_retries,
+            retry_base_delay=self._retry_base_delay,
+            error_message='OpenAI web search request failed',
+        )

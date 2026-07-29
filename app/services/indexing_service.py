@@ -44,44 +44,59 @@ class IndexingService:
 
         chunk_texts = [str(chunk['text']) for chunk in chunks]
         dense_vectors, sparse_vectors = await self._embed_chunks(chunk_texts)
-        now = datetime.now(timezone.utc).isoformat()
+        indexed_at = datetime.now(timezone.utc).isoformat()
 
-        points: list[models.PointStruct] = []
-        for chunk, dense_vector, sparse_vector in zip(
-            chunks,
-            dense_vectors,
-            sparse_vectors,
-            strict=True,
-        ):
-            raw_hash = stable_sha256(
-                f"{source_id}|{chunk['section_idx']}|{chunk['chunk_idx']}|{chunk['text']}"
+        points = [
+            self._build_point(
+                chunk=chunk,
+                dense_vector=dense_vector,
+                sparse_vector=sparse_vector,
+                source_id=source_id,
+                source_type=source_type,
+                source_url=source_url or '',
+                indexed_at=indexed_at,
             )
-            chunk_id = str(UUID(raw_hash[:32]))
+            for chunk, dense_vector, sparse_vector in zip(
+                chunks,
+                dense_vectors,
+                sparse_vectors,
+                strict=True,
+            )
+        ]
+        await self.qdrant.upsert_chunks(points)
 
-            payload = {
+    def _build_point(
+        self,
+        *,
+        chunk: dict[str, object],
+        dense_vector: list[float],
+        sparse_vector: models.SparseVector,
+        source_id: str,
+        source_type: str,
+        source_url: str,
+        indexed_at: str,
+    ) -> models.PointStruct:
+        raw_hash = stable_sha256(
+            f"{source_id}|{chunk['section_idx']}|{chunk['chunk_idx']}|{chunk['text']}"
+        )
+        return models.PointStruct(
+            id=str(UUID(raw_hash[:32])),
+            vector={
+                DENSE_VECTOR_NAME: dense_vector,
+                SPARSE_VECTOR_NAME: sparse_vector,
+            },
+            payload={
                 'source_id': source_id,
                 'source_type': source_type,
-                'source_url': source_url or '',
+                'source_url': source_url,
                 'title': chunk['title'],
                 'text': chunk['text'],
                 'section_idx': chunk['section_idx'],
                 'chunk_idx': chunk['chunk_idx'],
                 'language': DOCUMENT_LANGUAGE,
-                'indexed_at': now,
-            }
-
-            points.append(
-                models.PointStruct(
-                    id=chunk_id,
-                    vector={
-                        DENSE_VECTOR_NAME: dense_vector,
-                        SPARSE_VECTOR_NAME: sparse_vector,
-                    },
-                    payload=payload,
-                )
-            )
-
-        await self.qdrant.upsert_chunks(points)
+                'indexed_at': indexed_at,
+            },
+        )
 
     async def _embed_chunks(
         self,

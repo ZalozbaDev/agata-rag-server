@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import inspect
 import logging
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 from qdrant_client import AsyncQdrantClient, models
 
 from app.core.config import Settings
 from app.core.errors import QdrantServiceError
+from app.providers._provider_utils import is_timeout_error
 from app.utils.retry import retry_async
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar('T')
 
 DENSE_VECTOR_NAME = 'dense'
 SPARSE_VECTOR_NAME = 'bm25'
@@ -67,7 +73,7 @@ class QdrantGateway:
                 lambda: self.client.delete_collection(self.settings.qdrant_collection)
             )
 
-        await self._call(lambda: self._create_collection())
+        await self._call(self._create_collection)
         await self._ensure_payload_indexes()
 
     async def _collection_matches_schema(self) -> bool:
@@ -167,17 +173,7 @@ class QdrantGateway:
         prefetch_limit: int,
         language: str | None = None,
     ) -> list[models.ScoredPoint]:
-        query_filter: models.Filter | None = None
-        if language:
-            query_filter = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key='language',
-                        match=models.MatchValue(value=language),
-                    )
-                ]
-            )
-
+        query_filter = self._language_filter(language)
         result = await self._call(
             lambda: self.client.query_points(
                 collection_name=self.settings.qdrant_collection,
@@ -202,7 +198,20 @@ class QdrantGateway:
         )
         return result.points
 
-    async def _call(self, fn):
+    @staticmethod
+    def _language_filter(language: str | None) -> models.Filter | None:
+        if not language:
+            return None
+        return models.Filter(
+            must=[
+                models.FieldCondition(
+                    key='language',
+                    match=models.MatchValue(value=language),
+                )
+            ]
+        )
+
+    async def _call(self, fn: Callable[[], Awaitable[T]]) -> T:
         try:
             return await retry_async(
                 fn,
@@ -211,15 +220,12 @@ class QdrantGateway:
                 retryable=_is_transient_qdrant_error,
             )
         except Exception as exc:
-            is_timeout = 'timeout' in str(exc).lower()
             raise QdrantServiceError(
                 f'Qdrant request failed: {exc}',
-                is_timeout=is_timeout,
+                is_timeout=is_timeout_error(exc),
             ) from exc
 
     async def close(self) -> None:
-        import inspect
-
         result = self.client.close()
         if inspect.isawaitable(result):
             await result

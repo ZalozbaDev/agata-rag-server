@@ -34,9 +34,5 @@ class AskResponse(BaseModel):
     source_strategy: str = Field(default='rag')
 
 
-class ParseResponse(BaseModel):
-    items: list[ParsedSection]
-
-
 class HealthResponse(BaseModel):
     status: str = 'ok'

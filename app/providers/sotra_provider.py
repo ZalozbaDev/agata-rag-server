@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
-
 import httpx
 
 from app.core.config import Settings
 from app.core.errors import SotraServiceError
-from app.providers._provider_utils import _is_transient_http_error
+from app.providers._provider_utils import is_timeout_error, is_transient_http_error
 from app.utils.retry import retry_async
 
 
@@ -28,7 +26,6 @@ class SotraProvider:
     async def _translate(self, text: str, *, direction: str) -> str:
         if not text.strip():
             return text
-
         if not self._url:
             raise SotraServiceError('SOTRA_URL fehlt.')
         if not self._api_key:
@@ -57,28 +54,13 @@ class SotraProvider:
                 _call,
                 max_attempts=self._max_retries,
                 base_delay=self._retry_base_delay,
-                retryable=_is_transient_http_error,
+                retryable=is_transient_http_error,
             )
         except Exception as exc:
             raise SotraServiceError(
                 f'Sotra translation failed: {exc}',
-                is_timeout=isinstance(exc, httpx.TimeoutException)
-                or 'timeout' in str(exc).lower(),
+                is_timeout=isinstance(exc, httpx.TimeoutException) or is_timeout_error(exc),
             ) from exc
 
     async def close(self) -> None:
         await self._client.aclose()
-
-    @staticmethod
-    def _join_marked_translation(marked_translation: Any, separator: str) -> str:
-        if not isinstance(marked_translation, list):
-            return ''
-
-        joined_rows: list[str] = []
-        for item in marked_translation:
-            if isinstance(item, list):
-                joined_rows.append(' '.join(str(part) for part in item).strip())
-            else:
-                joined_rows.append(str(item).strip())
-
-        return separator.join(row for row in joined_rows if row).strip()

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -70,8 +71,6 @@ class Settings(BaseSettings):
             if not cleaned:
                 return ['*']
             if cleaned.startswith('['):
-                import json
-
                 loaded = json.loads(cleaned)
                 return [str(v).strip() for v in loaded if str(v).strip()]
             return [part.strip() for part in cleaned.split(',') if part.strip()]

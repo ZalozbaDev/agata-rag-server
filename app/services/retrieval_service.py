@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from typing import TypedDict
+
 from app.clients.qdrant_client import QdrantGateway
 from app.providers.openai_provider import OpenAIEmbeddingProvider
 from app.providers.sotra_provider import SotraProvider
 from app.services.indexing_service import DOCUMENT_LANGUAGE
 from app.utils.language import QueryLanguage, detect_query_language
 from app.utils.sparse_embedding import SparseEmbeddingProvider
+
+
+class RetrievalResult(TypedDict):
+    score: float
+    payload: dict[str, object]
 
 
 class RetrievalService:
@@ -24,7 +31,7 @@ class RetrievalService:
         self.sotra = sotra
         self.hybrid_prefetch_limit = hybrid_prefetch_limit
 
-    async def retrieve(self, question: str, top_k: int) -> list[dict[str, object]]:
+    async def retrieve(self, question: str, top_k: int) -> list[RetrievalResult]:
         query_language = detect_query_language(question)
         sparse_query_text = await self._sparse_query_text(question, query_language)
 
@@ -52,6 +59,7 @@ class RetrievalService:
         question: str,
         query_language: QueryLanguage,
     ) -> str:
+        # Sparse BM25 index is Upper Sorbian; translate DE queries before sparse search.
         if query_language == 'hsb':
             return question
         return await self.sotra.translate_de_to_hsb(question)
