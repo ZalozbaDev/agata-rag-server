@@ -7,6 +7,7 @@ from starlette.datastructures import UploadFile
 
 from app.api.dependencies import get_container
 from app.core.container import ServiceContainer
+from app.core.errors import ProviderError
 from app.models.schemas import AskRequest, AskResponse, HealthResponse, ParsedSection, ParseUrlRequest
 from app.parsers.adapters import FetchError, InvalidUrlError
 from app.parsers.pdf_parser import InvalidPdfError
@@ -237,8 +238,14 @@ async def ask(
     request: AskRequest,
     container: ServiceContainer = Depends(get_container),
 ) -> AskResponse:
-    return await container.rag_service.answer(
-        request.question,
-        history=request.history,
-        is_phone_call=request.is_phone_call,
-    )
+    try:
+        return await container.rag_service.answer(
+            request.question,
+            history=request.history,
+            is_phone_call=request.is_phone_call,
+        )
+    except ProviderError as exc:
+        status = 504 if exc.is_timeout else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail='Unexpected server error') from exc

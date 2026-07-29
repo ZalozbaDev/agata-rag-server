@@ -10,6 +10,7 @@ from app.services.rag_service import RagService
 from app.services.retrieval_service import RetrievalService
 from app.services.scheduler_service import ReparseScheduler
 from app.utils.chunking import Chunker
+from app.utils.sparse_embedding import SparseEmbeddingProvider
 
 
 class ServiceContainer:
@@ -17,6 +18,7 @@ class ServiceContainer:
         self.settings = settings
         self.qdrant = QdrantGateway(settings)
         self.embeddings = OpenAIEmbeddingProvider(settings)
+        self.sparse_embeddings = SparseEmbeddingProvider()
         self.llm = OpenAILLMProvider(settings)
         self.sotra = SotraProvider(settings)
         self.chunker = Chunker(
@@ -27,11 +29,15 @@ class ServiceContainer:
         self.indexing_service = IndexingService(
             qdrant=self.qdrant,
             embeddings=self.embeddings,
+            sparse_embeddings=self.sparse_embeddings,
             chunker=self.chunker,
         )
         self.retrieval_service = RetrievalService(
             qdrant=self.qdrant,
             embeddings=self.embeddings,
+            sparse_embeddings=self.sparse_embeddings,
+            sotra=self.sotra,
+            hybrid_prefetch_limit=settings.hybrid_prefetch_limit,
         )
         self.rag_service = RagService(
             retrieval=self.retrieval_service,
@@ -48,3 +54,8 @@ class ServiceContainer:
             interval_hours=settings.scheduler_interval_hours,
             urls=settings.reparse_urls,
         )
+
+    async def close(self) -> None:
+        await self.scheduler.stop()
+        await self.sotra.close()
+        await self.qdrant.close()

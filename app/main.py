@@ -25,8 +25,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await container.scheduler.stop()
-    await container.qdrant.close()
+    await container.close()
 
 
 settings = get_settings()

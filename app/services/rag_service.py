@@ -8,6 +8,7 @@ from app.models.schemas import AskResponse, AskSource
 from app.providers.openai_provider import OpenAILLMProvider
 from app.providers.sotra_provider import SotraProvider
 from app.services.retrieval_service import RetrievalService
+from app.utils.language import detect_query_language
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class RagService:
     ) -> AskResponse:
         history_items = history or []
         request_started = perf_counter()
+        query_language = detect_query_language(question_hsb)
 
         local_db_search_started = perf_counter()
         results = await self.retrieval.retrieve(question_hsb, self.top_k)
@@ -87,16 +89,13 @@ class RagService:
             if sorbian_contexts:
                 translation_started = perf_counter()
 
-                translated_parts = await asyncio.gather(
-                    self.sotra.translate_hsb_to_de(question_hsb),
+                question_de = await self._question_for_llm(question_hsb, query_language)
+                context_de = await asyncio.gather(
                     *[
                         self.sotra.translate_hsb_to_de(context)
                         for context in sorbian_contexts
-                    ],
+                    ]
                 )
-
-                question_de = translated_parts[0]
-                context_de = translated_parts[1:]
                 translation_ms = (perf_counter() - translation_started) * 1000
 
                 openai_started = perf_counter()
@@ -114,7 +113,7 @@ class RagService:
 
                 total_ms = (perf_counter() - request_started) * 1000
                 logger.info(
-                    'ask timing | strategy=rag | total=%.0fms | db=%.0fms | tr=%.0fms | openai=%.0fms | back_tr=%.0fms | hits=%d/%d | history_items=%d',
+                    'ask timing | strategy=rag | total=%.0fms | db=%.0fms | tr=%.0fms | openai=%.0fms | back_tr=%.0fms | hits=%d/%d | history_items=%d | query_lang=%s',
                     total_ms,
                     local_db_search_ms,
                     translation_ms,
@@ -123,6 +122,7 @@ class RagService:
                     len(strong_hits),
                     len(results),
                     len(history_items),
+                    query_language,
                 )
 
                 return AskResponse(
@@ -132,11 +132,10 @@ class RagService:
                 )
 
         translation_started = perf_counter()
-        question_de = await self.sotra.translate_hsb_to_de(question_hsb)
+        question_de = await self._question_for_llm(question_hsb, query_language)
         translation_ms = (perf_counter() - translation_started) * 1000
 
         openai_started = perf_counter()
-   
         web_result = await self.llm.answer_with_web_search(
             question_de,
             history=history_items,
@@ -150,7 +149,7 @@ class RagService:
 
         total_ms = (perf_counter() - request_started) * 1000
         logger.info(
-            'ask timing | strategy=web | total=%.0fms | db=%.0fms | tr=%.0fms | openai=%.0fms | back_tr=%.0fms | hits=%d/%d | history_items=%d',
+            'ask timing | strategy=web | total=%.0fms | db=%.0fms | tr=%.0fms | openai=%.0fms | back_tr=%.0fms | hits=%d/%d | history_items=%d | query_lang=%s',
             total_ms,
             local_db_search_ms,
             translation_ms,
@@ -159,6 +158,7 @@ class RagService:
             len(strong_hits),
             len(results),
             len(history_items),
+            query_language,
         )
 
         return AskResponse(
@@ -173,3 +173,8 @@ class RagService:
             ],
             source_strategy='web',
         )
+
+    async def _question_for_llm(self, question: str, query_language: str) -> str:
+        if query_language == 'de':
+            return question
+        return await self.sotra.translate_hsb_to_de(question)

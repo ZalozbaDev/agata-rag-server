@@ -10,6 +10,7 @@ dependencies = [
   'pydantic>=2',
   'pydantic-settings>=2',
   'qdrant-client',
+  'fastembed',
   'openai',
   'apscheduler',
   'httpx',

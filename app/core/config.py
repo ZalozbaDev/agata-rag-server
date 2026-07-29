@@ -23,8 +23,10 @@ class Settings(BaseSettings):
     qdrant_url: str = 'http://qdrant:6333'
     qdrant_api_key: str | None = None
     qdrant_collection: str = 'documents'
+    qdrant_timeout_seconds: float = 20.0
     embedding_dimension: int = 1536
     vector_distance: Literal['cosine', 'dot', 'euclid'] = 'cosine'
+    hybrid_prefetch_limit: int = 20
 
     llm_provider: Literal['openai'] = 'openai'
     embedding_provider: Literal['openai'] = 'openai'
@@ -32,17 +34,21 @@ class Settings(BaseSettings):
     openai_base_url: str | None = None
     openai_chat_model: str = 'gpt-5-mini'
     openai_embedding_model: str = 'text-embedding-3-small'
+    openai_timeout_seconds: float = 60.0
 
     retrieval_top_k: int = 6
-    retrieval_min_score: float = 0.55
+    retrieval_min_score: float = 0.015
     min_rag_hits: int = 1
 
     sotra_api_key: str | None = None
     sotra_url: str | None = None
-    sotra_timeout_seconds: float = 30.0    
+    sotra_timeout_seconds: float = 30.0
 
-    chunk_size: int = 1200
-    chunk_overlap: int = 150
+    provider_max_retries: int = 3
+    provider_retry_base_delay_seconds: float = 0.5
+
+    chunk_size: int = 1000
+    chunk_overlap: int = 200
     max_context_chunks: int = 8
 
     scheduler_enabled: bool = True
