@@ -50,12 +50,6 @@ def _is_transient_qdrant_error(exc: Exception) -> bool:
 class QdrantGateway:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-
-        print(settings.qdrant_url)
-        print(settings.qdrant_api_key)
-        print(settings.qdrant_timeout_seconds)
-
-        print(settings)
         self.client = AsyncQdrantClient(
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
