@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, HttpUrl
+from typing import Any
+
+from pydantic import AliasChoices, BaseModel, Field, HttpUrl
 
 
 class ParsedSection(BaseModel):
@@ -16,6 +18,8 @@ class ParseUrlRequest(BaseModel):
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1)
+    history: list[dict[str, Any]] | None = None
+    is_phone_call: bool | None = Field(default=None, validation_alias=AliasChoices('is_phone_call', 'isPhoneCall'))
 
 
 class AskSource(BaseModel):
