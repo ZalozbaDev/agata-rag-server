@@ -55,6 +55,11 @@ class ServiceContainer:
     async def close(self) -> None:
         await self.scheduler.stop()
         await self.sotra.close()
-        if hasattr(self.embeddings, 'close'):
-            await self.embeddings.close()
+        import inspect
+
+        close = getattr(self.embeddings, 'close', None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
         await self.qdrant.close()
