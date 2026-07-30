@@ -29,13 +29,15 @@ class Settings(BaseSettings):
     vector_distance: Literal['cosine', 'dot', 'euclid'] = 'cosine'
     hybrid_prefetch_limit: int = 20
 
-    llm_provider: Literal['openai'] = 'openai'
-    embedding_provider: Literal['openai'] = 'openai'
+    embedding_provider: Literal['openai', 'ollama'] = 'openai'
     openai_api_key: str | None = None
     openai_base_url: str | None = None
-    openai_chat_model: str = 'gpt-5-mini'
     openai_embedding_model: str = 'text-embedding-3-small'
     openai_timeout_seconds: float = 60.0
+
+    ollama_url: str | None = None
+    ollama_embedding_model: str = 'embeddinggemma'
+    ollama_timeout_seconds: float = 60.0
 
     retrieval_top_k: int = 6
     retrieval_min_score: float = 0.015

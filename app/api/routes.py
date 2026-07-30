@@ -295,11 +295,7 @@ async def ask(
     container: ServiceContainer = Depends(get_container),
 ) -> AskResponse:
     try:
-        return await container.rag_service.answer(
-            request.question,
-            history=request.history,
-            is_phone_call=request.is_phone_call,
-        )
+        return await container.rag_service.retrieve(request.question)
     except ProviderError as exc:
         status = 504 if exc.is_timeout else 502
         raise HTTPException(status_code=status, detail=str(exc)) from exc

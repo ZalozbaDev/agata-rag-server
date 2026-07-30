@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TypedDict
 
 from app.clients.qdrant_client import QdrantGateway
-from app.providers.openai_provider import OpenAIEmbeddingProvider
+from app.providers.embedding_factory import EmbeddingProvider
 from app.providers.sotra_provider import SotraProvider
 from app.services.indexing_service import DOCUMENT_LANGUAGE
 from app.utils.language import QueryLanguage, detect_query_language
@@ -19,7 +19,7 @@ class RetrievalService:
     def __init__(
         self,
         qdrant: QdrantGateway,
-        embeddings: OpenAIEmbeddingProvider,
+        embeddings: EmbeddingProvider,
         sparse_embeddings: SparseEmbeddingProvider,
         sotra: SotraProvider,
         *,

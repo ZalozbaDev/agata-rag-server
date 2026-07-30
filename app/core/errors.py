@@ -15,5 +15,9 @@ class OpenAIServiceError(ProviderError):
     pass
 
 
+class OllamaServiceError(ProviderError):
+    pass
+
+
 class SotraServiceError(ProviderError):
     pass

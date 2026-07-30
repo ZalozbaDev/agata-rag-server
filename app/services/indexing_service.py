@@ -7,7 +7,7 @@ from qdrant_client import models
 
 from app.clients.qdrant_client import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME, QdrantGateway
 from app.models.schemas import ParsedSection
-from app.providers.openai_provider import OpenAIEmbeddingProvider
+from app.providers.embedding_factory import EmbeddingProvider
 from app.utils.chunking import Chunker
 from app.utils.hashing import stable_sha256
 from app.utils.sparse_embedding import SparseEmbeddingProvider
@@ -19,7 +19,7 @@ class IndexingService:
     def __init__(
         self,
         qdrant: QdrantGateway,
-        embeddings: OpenAIEmbeddingProvider,
+        embeddings: EmbeddingProvider,
         sparse_embeddings: SparseEmbeddingProvider,
         chunker: Chunker,
     ) -> None:
