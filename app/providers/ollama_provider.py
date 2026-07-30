@@ -48,8 +48,13 @@ class OllamaEmbeddingProvider:
         self._client = httpx.AsyncClient(timeout=self._timeout)
 
     async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
-        return list(await asyncio.gather(*(self._embed_one(text) for text in texts)))
+        semaphore = asyncio.Semaphore(8)
 
+        async def _limited(text: str) -> list[float]:
+            async with semaphore:
+                return await self._embed_one(text)
+
+        return list(await asyncio.gather(*(_limited(text) for text in texts)))
     async def embed_query(self, text: str) -> list[float]:
         vectors = await self.embed_texts([text])
         return vectors[0]
