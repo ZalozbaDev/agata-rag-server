@@ -25,6 +25,7 @@ class AskSource(BaseModel):
 
 
 class AskResponse(BaseModel):
+    answer: str = Field(default='')
     contexts: list[str] = Field(default_factory=list)
     sources: list[AskSource] = Field(default_factory=list)
 
