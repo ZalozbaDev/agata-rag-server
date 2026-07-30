@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.clients.qdrant_client import QdrantGateway
 from app.core.config import Settings
-from app.providers.openai_provider import OpenAIEmbeddingProvider, OpenAILLMProvider
+from app.providers.embedding_factory import create_embedding_provider
 from app.providers.sotra_provider import SotraProvider
 from app.services.indexing_service import IndexingService
 from app.services.parser_service import ParserService
@@ -17,9 +17,8 @@ class ServiceContainer:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.qdrant = QdrantGateway(settings)
-        self.embeddings = OpenAIEmbeddingProvider(settings)
+        self.embeddings = create_embedding_provider(settings)
         self.sparse_embeddings = SparseEmbeddingProvider()
-        self.llm = OpenAILLMProvider(settings)
         self.sotra = SotraProvider(settings)
         self.chunker = Chunker(
             chunk_size=settings.chunk_size,
@@ -41,8 +40,6 @@ class ServiceContainer:
         )
         self.rag_service = RagService(
             retrieval=self.retrieval_service,
-            llm=self.llm,
-            sotra=self.sotra,
             top_k=settings.retrieval_top_k,
             max_context_chunks=settings.max_context_chunks,
             retrieval_min_score=settings.retrieval_min_score,
@@ -58,4 +55,11 @@ class ServiceContainer:
     async def close(self) -> None:
         await self.scheduler.stop()
         await self.sotra.close()
+        import inspect
+
+        close = getattr(self.embeddings, 'close', None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
         await self.qdrant.close()
