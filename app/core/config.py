@@ -125,7 +125,7 @@ def get_settings() -> Settings:
         hybrid_prefetch_limit=int(os.getenv('HYBRID_PREFETCH_LIMIT', '20')),
         embedding_provider=cast(
             Literal['openai', 'ollama'],
-            os.getenv('EMBEDDING_PROVIDER', 'openai'),
+            os.getenv('LLM_PROVIDER', 'openai'),
         ),
         llm_provider=cast(
             Literal['openai', 'ollama'],
