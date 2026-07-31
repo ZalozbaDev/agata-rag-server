@@ -87,10 +87,6 @@ class Settings(BaseModel):
     retrieval_min_score: float
     min_rag_hits: int
 
-    sotra_api_key: str | None
-    sotra_url: str | None
-    sotra_timeout_seconds: float
-
     provider_max_retries: int
     provider_retry_base_delay_seconds: float
 
@@ -143,9 +139,6 @@ def get_settings() -> Settings:
         retrieval_top_k=int(os.getenv('RETRIEVAL_TOP_K', '6')),
         retrieval_min_score=float(os.getenv('RETRIEVAL_MIN_SCORE', '0.015')),
         min_rag_hits=int(os.getenv('MIN_RAG_HITS', '1')),
-        sotra_api_key=os.getenv('SOTRA_API_KEY') or None,
-        sotra_url=os.getenv('SOTRA_URL') or None,
-        sotra_timeout_seconds=float(os.getenv('SOTRA_TIMEOUT_SECONDS', '30')),
         provider_max_retries=int(os.getenv('PROVIDER_MAX_RETRIES', '3')),
         provider_retry_base_delay_seconds=float(
             os.getenv('PROVIDER_RETRY_BASE_DELAY_SECONDS', '0.5')

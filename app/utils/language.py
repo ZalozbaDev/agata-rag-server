@@ -25,11 +25,7 @@ _HSB_MARKERS = (
 
 
 def detect_query_language(text: str) -> QueryLanguage:
-    """Heuristic HSB detection via diacritics and frequent function words.
-
-    Defaults to German so sparse Latin-only HSB queries still get DE→HSB
-    translation before sparse retrieval rather than skipping it.
-    """
+    """Heuristic HSB detection via diacritics and frequent function words."""
     normalized = ' '.join(text.split()).lower()
     if not normalized:
         return 'de'

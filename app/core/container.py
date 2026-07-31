@@ -3,7 +3,6 @@ from __future__ import annotations
 from app.clients.qdrant_client import QdrantGateway
 from app.core.config import Settings
 from app.providers.embedding_factory import create_embedding_provider
-from app.providers.sotra_provider import SotraProvider
 from app.services.indexing_service import IndexingService
 from app.services.parser_service import ParserService
 from app.services.rag_service import RagService
@@ -19,7 +18,6 @@ class ServiceContainer:
         self.qdrant = QdrantGateway(settings)
         self.embeddings = create_embedding_provider(settings)
         self.sparse_embeddings = SparseEmbeddingProvider()
-        self.sotra = SotraProvider(settings)
         self.chunker = Chunker(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
@@ -35,7 +33,6 @@ class ServiceContainer:
             qdrant=self.qdrant,
             embeddings=self.embeddings,
             sparse_embeddings=self.sparse_embeddings,
-            sotra=self.sotra,
             hybrid_prefetch_limit=settings.hybrid_prefetch_limit,
         )
         self.rag_service = RagService(
@@ -54,7 +51,6 @@ class ServiceContainer:
 
     async def close(self) -> None:
         await self.scheduler.stop()
-        await self.sotra.close()
         import inspect
 
         close = getattr(self.embeddings, 'close', None)
