@@ -33,6 +33,7 @@ def make_settings(**overrides: object) -> Settings:
         'openai_chat_model': 'm',
         'openai_timeout_seconds': 5.0,
         'ollama_url': None,
+        'ollama_api_key': None,
         'ollama_embedding_model': 'm',
         'ollama_chat_model': 'm',
         'ollama_timeout_seconds': 5.0,

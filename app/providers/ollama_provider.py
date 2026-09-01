@@ -45,7 +45,10 @@ class OllamaEmbeddingProvider:
         self._timeout = settings.ollama_timeout_seconds
         self._max_retries = settings.provider_max_retries
         self._retry_base_delay = settings.provider_retry_base_delay_seconds
-        self._client = httpx.AsyncClient(timeout=self._timeout)
+        headers: dict[str, str] = {}
+        if settings.ollama_api_key:
+            headers['Authorization'] = f'Bearer {settings.ollama_api_key}'
+        self._client = httpx.AsyncClient(timeout=self._timeout, headers=headers)
 
     async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         semaphore = asyncio.Semaphore(8)

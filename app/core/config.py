@@ -81,6 +81,7 @@ class Settings(BaseModel):
     openai_timeout_seconds: float
 
     ollama_url: str | None
+    ollama_api_key: str | None
     ollama_embedding_model: str
     ollama_chat_model: str
     ollama_timeout_seconds: float
@@ -137,6 +138,7 @@ def get_settings() -> Settings:
         openai_chat_model=os.getenv('OPENAI_CHAT_MODEL', 'gpt-5-mini'),
         openai_timeout_seconds=float(os.getenv('OPENAI_TIMEOUT_SECONDS', '60')),
         ollama_url=os.getenv('LLM_EMBEDDING_ENDPOINT') or None,
+        ollama_api_key=os.getenv('LLM_EMBEDDING_API_KEY') or None,
         ollama_embedding_model=os.getenv('LLM_EMBEDDING_MODEL', 'embeddinggemma'),
         ollama_chat_model=os.getenv('LLM_EMBEDDING_MODEL', 'qwen3.5:4b'),
         ollama_timeout_seconds=float(os.getenv('OLLAMA_TIMEOUT_SECONDS', '60')),
