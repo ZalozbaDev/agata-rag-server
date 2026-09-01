@@ -12,8 +12,6 @@ from app.utils.chunking import Chunker
 from app.utils.hashing import stable_sha256
 from app.utils.sparse_embedding import SparseEmbeddingProvider
 
-DOCUMENT_LANGUAGE = 'hsb'
-
 
 class IndexingService:
     def __init__(
@@ -22,11 +20,13 @@ class IndexingService:
         embeddings: EmbeddingProvider,
         sparse_embeddings: SparseEmbeddingProvider,
         chunker: Chunker,
+        document_language: str,
     ) -> None:
         self.qdrant = qdrant
         self.embeddings = embeddings
         self.sparse_embeddings = sparse_embeddings
         self.chunker = chunker
+        self.document_language = document_language
 
     async def store_sections(
         self,
@@ -35,12 +35,16 @@ class IndexingService:
         source_type: str,
         sections: list[ParsedSection],
         source_url: str | None = None,
+        collection: str | None = None,
+        language: str | None = None,
     ) -> None:
         chunks = self.chunker.split_sections(sections)
         if not chunks:
             return
 
-        await self.qdrant.delete_by_source_id(source_id)
+        target = self.qdrant.resolve_collection(collection)
+        await self.qdrant.ensure_collection(target)
+        await self.qdrant.delete_by_source_id(target, source_id)
 
         chunk_texts = [str(chunk['text']) for chunk in chunks]
         dense_vectors, sparse_vectors = await self._embed_chunks(chunk_texts)
@@ -55,6 +59,7 @@ class IndexingService:
                 source_type=source_type,
                 source_url=source_url or '',
                 indexed_at=indexed_at,
+                language=(language or '').strip() or self.document_language,
             )
             for chunk, dense_vector, sparse_vector in zip(
                 chunks,
@@ -63,7 +68,7 @@ class IndexingService:
                 strict=True,
             )
         ]
-        await self.qdrant.upsert_chunks(points)
+        await self.qdrant.upsert_chunks(target, points)
 
     def _build_point(
         self,
@@ -75,6 +80,7 @@ class IndexingService:
         source_type: str,
         source_url: str,
         indexed_at: str,
+        language: str,
     ) -> models.PointStruct:
         raw_hash = stable_sha256(
             f"{source_id}|{chunk['section_idx']}|{chunk['chunk_idx']}|{chunk['text']}"
@@ -93,7 +99,7 @@ class IndexingService:
                 'text': chunk['text'],
                 'section_idx': chunk['section_idx'],
                 'chunk_idx': chunk['chunk_idx'],
-                'language': DOCUMENT_LANGUAGE,
+                'language': language,
                 'indexed_at': indexed_at,
             },
         )

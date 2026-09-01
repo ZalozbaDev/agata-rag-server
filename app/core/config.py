@@ -65,7 +65,9 @@ class Settings(BaseModel):
     qdrant_url: str
     qdrant_api_key: str | None
     qdrant_collection: str
+    qdrant_allowed_collections: list[str]
     qdrant_timeout_seconds: float
+    document_language: str
     embedding_dimension: int
     vector_distance: Literal['cosine', 'dot', 'euclid']
     hybrid_prefetch_limit: int
@@ -112,8 +114,10 @@ def get_settings() -> Settings:
         qdrant_url=os.getenv('QDRANT_URL', 'http://qdrant:6333'),
         qdrant_api_key=os.getenv('QDRANT_API_KEY') or None,
         qdrant_collection=os.getenv('QDRANT_COLLECTION', 'documents'),
+        qdrant_allowed_collections=_parse_list(os.getenv('QDRANT_ALLOWED_COLLECTIONS')),
         qdrant_timeout_seconds=float(os.getenv('QDRANT_TIMEOUT_SECONDS', '20')),
-        embedding_dimension=int(os.getenv('EMBEDDING_DIMENSION', '1536')),
+        document_language=os.getenv('DOCUMENT_LANGUAGE', 'hsb'),
+        embedding_dimension=int(os.getenv('EMBEDDING_DIMENSION', '768')),
         vector_distance=cast(
             Literal['cosine', 'dot', 'euclid'],
             os.getenv('VECTOR_DISTANCE', 'cosine'),

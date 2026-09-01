@@ -4,7 +4,6 @@ from typing import TypedDict
 
 from app.clients.qdrant_client import QdrantGateway
 from app.providers.embedding_factory import EmbeddingProvider
-from app.services.indexing_service import DOCUMENT_LANGUAGE
 from app.utils.sparse_embedding import SparseEmbeddingProvider
 
 
@@ -27,16 +26,25 @@ class RetrievalService:
         self.sparse_embeddings = sparse_embeddings
         self.hybrid_prefetch_limit = hybrid_prefetch_limit
 
-    async def retrieve(self, question: str, top_k: int) -> list[RetrievalResult]:
+    async def retrieve(
+        self,
+        question: str,
+        top_k: int,
+        collection: str | None = None,
+    ) -> list[RetrievalResult]:
+        target = self.qdrant.resolve_collection(collection)
+        # A persona may point at a collection that has not been filled yet.
+        await self.qdrant.ensure_collection(target)
+
         dense_vector = await self.embeddings.embed_query(question)
         sparse_vector = await self.sparse_embeddings.embed_query_async(question)
 
         hits = await self.qdrant.hybrid_search(
+            collection=target,
             dense_vector=dense_vector,
             sparse_vector=sparse_vector,
             limit=top_k,
             prefetch_limit=self.hybrid_prefetch_limit,
-            language=DOCUMENT_LANGUAGE,
         )
 
         return [

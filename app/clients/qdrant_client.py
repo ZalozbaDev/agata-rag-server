@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
@@ -15,6 +16,12 @@ from app.utils.retry import retry_async
 logger = logging.getLogger(__name__)
 
 T = TypeVar('T')
+
+COLLECTION_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_\-]{0,62}$')
+
+
+class UnknownCollectionError(ValueError):
+    """Raised when a request asks for a collection that is not allowed."""
 
 DENSE_VECTOR_NAME = 'dense'
 SPARSE_VECTOR_NAME = 'bm25'
@@ -55,31 +62,47 @@ class QdrantGateway:
             api_key=settings.qdrant_api_key,
             timeout=settings.qdrant_timeout_seconds,
         )
+        self._ensured_collections: set[str] = set()
 
-    async def ensure_collection(self) -> None:
-        exists = await self._call(
-            lambda: self.client.collection_exists(self.settings.qdrant_collection)
-        )
-        if exists and await self._collection_matches_schema():
-            await self._ensure_payload_indexes()
+    def resolve_collection(self, collection: str | None) -> str:
+        """Map an optional request-supplied collection to a safe, known name."""
+        name = (collection or '').strip()
+        if not name:
+            return self.settings.qdrant_collection
+
+        if not COLLECTION_NAME_RE.match(name):
+            raise UnknownCollectionError(f'Invalid collection name: {collection!r}')
+
+        allowed = self.settings.qdrant_allowed_collections
+        if allowed and name not in allowed and name != self.settings.qdrant_collection:
+            raise UnknownCollectionError(f'Unknown collection: {name}')
+
+        return name
+
+    async def ensure_collection(self, collection: str | None = None) -> None:
+        name = self.resolve_collection(collection)
+        if name in self._ensured_collections:
+            return
+
+        exists = await self._call(lambda: self.client.collection_exists(name))
+        if exists and await self._collection_matches_schema(name):
+            await self._ensure_payload_indexes(name)
+            self._ensured_collections.add(name)
             return
 
         if exists:
             logger.warning(
                 'Qdrant collection %s has incompatible schema; recreating.',
-                self.settings.qdrant_collection,
+                name,
             )
-            await self._call(
-                lambda: self.client.delete_collection(self.settings.qdrant_collection)
-            )
+            await self._call(lambda: self.client.delete_collection(name))
 
-        await self._call(self._create_collection)
-        await self._ensure_payload_indexes()
+        await self._call(lambda: self._create_collection(name))
+        await self._ensure_payload_indexes(name)
+        self._ensured_collections.add(name)
 
-    async def _collection_matches_schema(self) -> bool:
-        info = await self._call(
-            lambda: self.client.get_collection(self.settings.qdrant_collection)
-        )
+    async def _collection_matches_schema(self, collection: str) -> bool:
+        info = await self._call(lambda: self.client.get_collection(collection))
         params = info.config.params
 
         vectors = params.vectors
@@ -100,9 +123,9 @@ class QdrantGateway:
         sparse_vectors = params.sparse_vectors or {}
         return SPARSE_VECTOR_NAME in sparse_vectors
 
-    async def _create_collection(self) -> None:
+    async def _create_collection(self, collection: str) -> None:
         await self.client.create_collection(
-            collection_name=self.settings.qdrant_collection,
+            collection_name=collection,
             vectors_config={
                 DENSE_VECTOR_NAME: models.VectorParams(
                     size=self.settings.embedding_dimension,
@@ -116,12 +139,12 @@ class QdrantGateway:
             },
         )
 
-    async def _ensure_payload_indexes(self) -> None:
+    async def _ensure_payload_indexes(self, collection: str) -> None:
         for field_name, schema_type in _PAYLOAD_INDEX_FIELDS.items():
             try:
                 await self._call(
                     lambda field=field_name, schema=schema_type: self.client.create_payload_index(
-                        collection_name=self.settings.qdrant_collection,
+                        collection_name=collection,
                         field_name=field,
                         field_schema=schema,
                     )
@@ -131,14 +154,14 @@ class QdrantGateway:
                     logger.warning(
                         'Could not create payload index %s on %s: %s',
                         field_name,
-                        self.settings.qdrant_collection,
+                        collection,
                         exc,
                     )
 
-    async def delete_by_source_id(self, source_id: str) -> None:
+    async def delete_by_source_id(self, collection: str, source_id: str) -> None:
         await self._call(
             lambda: self.client.delete(
-                collection_name=self.settings.qdrant_collection,
+                collection_name=collection,
                 points_selector=models.FilterSelector(
                     filter=models.Filter(
                         must=[
@@ -153,12 +176,33 @@ class QdrantGateway:
             )
         )
 
-    async def upsert_chunks(self, points: list[models.PointStruct]) -> None:
+    async def list_collections(self) -> list[dict[str, object]]:
+        response = await self._call(self.client.get_collections)
+        summaries: list[dict[str, object]] = []
+
+        for description in response.collections:
+            name = description.name
+            try:
+                info = await self._call(
+                    lambda n=name: self.client.get_collection(n)
+                )
+                points = info.points_count
+            except Exception:
+                points = None
+            summaries.append({'name': name, 'points': points})
+
+        return sorted(summaries, key=lambda item: str(item['name']))
+
+    async def upsert_chunks(
+        self,
+        collection: str,
+        points: list[models.PointStruct],
+    ) -> None:
         if not points:
             return
         await self._call(
             lambda: self.client.upsert(
-                collection_name=self.settings.qdrant_collection,
+                collection_name=collection,
                 points=points,
                 wait=True,
             )
@@ -167,28 +211,25 @@ class QdrantGateway:
     async def hybrid_search(
         self,
         *,
+        collection: str,
         dense_vector: list[float],
         sparse_vector: models.SparseVector,
         limit: int,
         prefetch_limit: int,
-        language: str | None = None,
     ) -> list[models.ScoredPoint]:
-        query_filter = self._language_filter(language)
         result = await self._call(
             lambda: self.client.query_points(
-                collection_name=self.settings.qdrant_collection,
+                collection_name=collection,
                 prefetch=[
                     models.Prefetch(
                         query=dense_vector,
                         using=DENSE_VECTOR_NAME,
                         limit=prefetch_limit,
-                        filter=query_filter,
                     ),
                     models.Prefetch(
                         query=sparse_vector,
                         using=SPARSE_VECTOR_NAME,
                         limit=prefetch_limit,
-                        filter=query_filter,
                     ),
                 ],
                 query=models.FusionQuery(fusion=models.Fusion.RRF),
@@ -197,19 +238,6 @@ class QdrantGateway:
             )
         )
         return result.points
-
-    @staticmethod
-    def _language_filter(language: str | None) -> models.Filter | None:
-        if not language:
-            return None
-        return models.Filter(
-            must=[
-                models.FieldCondition(
-                    key='language',
-                    match=models.MatchValue(value=language),
-                )
-            ]
-        )
 
     async def _call(self, fn: Callable[[], Awaitable[T]]) -> T:
         try:

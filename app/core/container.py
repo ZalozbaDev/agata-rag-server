@@ -28,6 +28,7 @@ class ServiceContainer:
             embeddings=self.embeddings,
             sparse_embeddings=self.sparse_embeddings,
             chunker=self.chunker,
+            document_language=settings.document_language,
         )
         self.retrieval_service = RetrievalService(
             qdrant=self.qdrant,

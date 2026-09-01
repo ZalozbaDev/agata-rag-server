@@ -7,9 +7,18 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.datastructures import UploadFile
 
 from app.api.dependencies import get_container
+from app.clients.qdrant_client import UnknownCollectionError
 from app.core.container import ServiceContainer
 from app.core.errors import ProviderError
-from app.models.schemas import AskRequest, AskResponse, HealthResponse, ParsedSection, ParseUrlRequest
+from app.models.schemas import (
+    AskRequest,
+    AskResponse,
+    CollectionInfo,
+    CollectionsResponse,
+    HealthResponse,
+    ParsedSection,
+    ParseUrlRequest,
+)
 from app.parsers.adapters import FetchError, InvalidUrlError
 from app.parsers.pdf_parser import InvalidPdfError
 from app.utils.hashing import stable_sha256
@@ -24,6 +33,8 @@ class HtmlParseInput:
     min_chars: int
     file_name: str | None
     store_in_db: bool
+    collection: str | None
+    language: str | None
 
 
 @dataclass(frozen=True)
@@ -31,11 +42,30 @@ class PdfParseInput:
     files: list[tuple[bytes, str | None]]
     min_chars: int
     store_in_db: bool
+    collection: str | None
+    language: str | None
 
 
 @router.get('/health', response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse()
+
+
+@router.get('/collections', response_model=CollectionsResponse)
+async def collections(
+    container: ServiceContainer = Depends(get_container),
+) -> CollectionsResponse:
+    try:
+        items = await container.qdrant.list_collections()
+    except ProviderError as exc:
+        status = 504 if exc.is_timeout else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    return CollectionsResponse(
+        default=container.settings.qdrant_collection,
+        allowed=container.settings.qdrant_allowed_collections,
+        collections=[CollectionInfo(**item) for item in items],
+    )
 
 
 def _parse_int_param(value: Any, *, field_name: str, default: int = 40) -> int:
@@ -76,6 +106,13 @@ def _first_present(*candidates: Any) -> Any:
     return None
 
 
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 async def _parse_html_request(request: Request) -> HtmlParseInput:
     query_min_chars = request.query_params.get('min_chars')
     query_store_in_db = request.query_params.get('store_in_db')
@@ -86,6 +123,8 @@ async def _parse_html_request(request: Request) -> HtmlParseInput:
     file_name: str | None = None
     min_chars_candidate: Any = query_min_chars
     store_in_db_candidate: Any = query_store_in_db
+    collection_candidate: Any = request.query_params.get('collection')
+    language_candidate: Any = request.query_params.get('language')
 
     if 'application/json' in content_type:
         payload = await request.json()
@@ -96,6 +135,8 @@ async def _parse_html_request(request: Request) -> HtmlParseInput:
             store_in_db_candidate,
             payload.get('store_in_db'),
         )
+        collection_candidate = _first_present(collection_candidate, payload.get('collection'))
+        language_candidate = _first_present(language_candidate, payload.get('language'))
     else:
         form = await request.form()
         upload_obj = form.get('file')
@@ -115,6 +156,8 @@ async def _parse_html_request(request: Request) -> HtmlParseInput:
             store_in_db_candidate,
             form.get('store_in_db'),
         )
+        collection_candidate = _first_present(collection_candidate, form.get('collection'))
+        language_candidate = _first_present(language_candidate, form.get('language'))
 
     if not html:
         raise HTTPException(status_code=400, detail='Missing HTML content')
@@ -125,6 +168,8 @@ async def _parse_html_request(request: Request) -> HtmlParseInput:
         min_chars=_parse_int_param(min_chars_candidate, field_name='min_chars'),
         file_name=file_name,
         store_in_db=_parse_bool_param(store_in_db_candidate, field_name='store_in_db'),
+        collection=_optional_str(collection_candidate),
+        language=_optional_str(language_candidate),
     )
 
 
@@ -176,6 +221,12 @@ async def _parse_pdf_request(request: Request) -> PdfParseInput:
         _first_present(form.get('store_in_db'), request.query_params.get('store_in_db')),
         field_name='store_in_db',
     )
+    collection = _optional_str(
+        _first_present(form.get('collection'), request.query_params.get('collection'))
+    )
+    language = _optional_str(
+        _first_present(form.get('language'), request.query_params.get('language'))
+    )
 
     pdf_files: list[tuple[bytes, str | None]] = []
     for upload in uploads:
@@ -186,7 +237,13 @@ async def _parse_pdf_request(request: Request) -> PdfParseInput:
             )
         pdf_files.append((await upload.read(), upload.filename))
 
-    return PdfParseInput(files=pdf_files, min_chars=min_chars, store_in_db=store_in_db)
+    return PdfParseInput(
+        files=pdf_files,
+        min_chars=min_chars,
+        store_in_db=store_in_db,
+        collection=collection,
+        language=language,
+    )
 
 
 async def _maybe_store_sections(
@@ -197,15 +254,22 @@ async def _maybe_store_sections(
     source_type: str,
     sections: list[ParsedSection],
     source_url: str | None = None,
+    collection: str | None = None,
+    language: str | None = None,
 ) -> None:
     if not store_in_db:
         return
-    await container.indexing_service.store_sections(
-        source_id=source_id,
-        source_type=source_type,
-        sections=sections,
-        source_url=source_url,
-    )
+    try:
+        await container.indexing_service.store_sections(
+            source_id=source_id,
+            source_type=source_type,
+            sections=sections,
+            source_url=source_url,
+            collection=collection,
+            language=language,
+        )
+    except UnknownCollectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post('/parsePdf', response_model=list[ParsedSection])
@@ -234,6 +298,8 @@ async def parse_pdf(
             source_type='pdf_upload',
             sections=file_sections,
             source_url=file_name,
+            collection=parse_input.collection,
+            language=parse_input.language,
         )
         sections.extend(file_sections)
 
@@ -260,6 +326,8 @@ async def parse_html(
         source_type='html_upload',
         sections=sections,
         source_url=parse_input.source_url,
+        collection=parse_input.collection,
+        language=parse_input.language,
     )
     return sections
 
@@ -285,6 +353,8 @@ async def parse_url_post(
         source_type='url',
         sections=sections,
         source_url=url,
+        collection=request.collection,
+        language=request.language,
     )
     return sections
 
@@ -295,9 +365,17 @@ async def ask(
     container: ServiceContainer = Depends(get_container),
 ) -> AskResponse:
     try:
-        return await container.rag_service.retrieve(request.question)
+        return await container.rag_service.retrieve(
+            request.question,
+            collection=request.collection,
+            top_k=request.top_k,
+        )
+    except UnknownCollectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ProviderError as exc:
         status = 504 if exc.is_timeout else 502
         raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail='Unexpected server error') from exc
