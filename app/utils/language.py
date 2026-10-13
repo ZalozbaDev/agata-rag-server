@@ -93,7 +93,7 @@ _DE_MARKERS = frozenset(
 
 _WORD_RE = re.compile(r'[^\W\d_]+', re.UNICODE)
 
-ALLOWED_DOCUMENT_LANGUAGES = frozenset({'de', 'hsb'})
+ALLOWED_DOCUMENT_LANGUAGES = frozenset({'de', 'hsb', 'dsb'})
 
 
 class UnknownLanguageError(ValueError):
@@ -108,18 +108,16 @@ def resolve_document_language(
 ) -> str:
     """Map a parse-request language to the payload value we actually store.
 
-    ``de`` / ``hsb`` are used as-is. ``auto``, empty and omitted fall back to
-    detecting the language from the document text, then to ``default``.
+    ``de`` / ``hsb`` / ``dsb`` are used as-is. ``auto``, empty and omitted fall
+    back to detecting the language from the document text, then to ``default``.
     """
     explicit = (requested or '').strip().lower()
     if explicit in {'', 'auto'}:
         return detect_language('\n'.join(texts), default=default)
-    if explicit == 'dsb':
-        return 'hsb'
     if explicit in ALLOWED_DOCUMENT_LANGUAGES:
         return explicit
     raise UnknownLanguageError(
-        f'language must be de, hsb or auto, got {requested!r}'
+        f'language must be de, hsb, dsb or auto, got {requested!r}'
     )
 
 

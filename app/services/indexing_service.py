@@ -139,7 +139,7 @@ class IndexingService:
         requested: str | None,
         sections: list[ParsedSection],
     ) -> str:
-        """Caller can pin de/hsb; otherwise the text decides.
+        """Caller can pin de/hsb/dsb; otherwise the text decides.
 
         The configured default is only used when the document has no language
         signal. Pinning DOCUMENT_LANGUAGE=hsb is how German PDFs used to end
