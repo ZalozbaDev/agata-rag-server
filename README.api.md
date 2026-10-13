@@ -61,7 +61,7 @@ Turn HTML, URLs, or PDFs into text sections. Shared response shape:
 
 ```json
 [
-  { "title": "Section title", "text": "Extracted text..." }
+  { "title": "Section title", "text": "Extracted text...", "language": "de" }
 ]
 ```
 
@@ -72,7 +72,7 @@ Shared optional fields:
 | `min_chars` | `40` | Drop sections shorter than this many characters |
 | `store_in_db` | `false` | When `true`, embed and store sections in Qdrant |
 | `collection` | `QDRANT_COLLECTION` | Target collection when storing |
-| `language` | `DOCUMENT_LANGUAGE` (`hsb`) | Written to the `language` payload field |
+| `language` | `auto` | `de`, `hsb`, or `auto`. `auto` (and omitting the field) detects from the text, then falls back to `DOCUMENT_LANGUAGE`. The resolved value is written onto each section and into the Qdrant payload. |
 
 ### `POST /parseHtml`
 
@@ -163,7 +163,7 @@ curl -X POST http://localhost:8000/parsePdf \
 
 **Fields:** one or more PDF files (required), `min_chars`, `store_in_db`, `collection`, `language` (form or query).
 
-Errors: `400` missing/non-PDF/invalid/encrypted PDF, or unknown collection.
+Errors: `400` missing/non-PDF/invalid/encrypted PDF, unknown collection, or unknown `language`.
 
 ---
 
@@ -193,8 +193,13 @@ curl -X POST http://localhost:8000/ask \
 | `question` | yes | User question (non-empty) |
 | `collection` | no | Collection to search; defaults to `QDRANT_COLLECTION` |
 | `top_k` / `topK` | no | Chunks to retrieve (1–50); defaults to `RETRIEVAL_TOP_K` |
+| `language` | no | Document language of the collection (`de` / `hsb`); picks BM25 stemming. Defaults to `BM25_LANGUAGE` |
 | `history` | no | Optional conversation history |
 | `isPhoneCall` / `is_phone_call` | no | Optional phone-call flag |
+
+Send `language` in the language the *collection* is written in, not the language
+of the user. A Sorbian question against a German corpus should be translated
+before it reaches this endpoint, otherwise BM25 has nothing to match on.
 
 Response:
 
@@ -208,15 +213,71 @@ Response:
     {
       "source_type": "url",
       "source_url": "https://example.com/artikel",
-      "title": "Section title"
+      "title": "Section title",
+      "score": 0.82
     }
-  ]
+  ],
+  "scores": [0.82]
 }
 ```
 
-If not enough strong retrieval hits are found, `contexts` and `sources` are empty.
+If not enough strong retrieval hits are found, `contexts`, `sources`, and `scores` are empty.
 
-`contexts[i]` and `sources[i]` are 1:1 aligned so the caller can map citations
-back to their metadata.
+`contexts[i]`, `sources[i]`, and `scores[i]` are 1:1 aligned so the caller can map
+citations and retrieval quality back to their metadata.
 
 Errors: `400` unknown collection, `502` / `504` provider failures, `500` unexpected server error.
+
+---
+
+## Managed persona documents
+
+These endpoints only accept collections named `persona_` plus 24 hex characters.
+That is the collection the Agata server creates for one MongoDB persona. The
+default collection and the static Załožba collections are rejected, so a persona
+upload cannot land in another knowledge base.
+
+`persona_<id>` stays reachable even when `QDRANT_ALLOWED_COLLECTIONS` is set.
+
+### `POST /documents`
+
+Index one PDF or HTML file. Multipart field: `file`. Form fields: `collection`
+(required), optional `min_chars` and `language`.
+
+```bash
+curl -X POST http://localhost:8000/documents \
+  -F "file=@./foerderrichtlinie.pdf" \
+  -F "collection=persona_0123456789abcdef01234567"
+```
+
+```json
+{
+  "source_id": "pdf:…",
+  "collection": "persona_0123456789abcdef01234567",
+  "section_count": 4,
+  "chunk_count": 6,
+  "filename": "foerderrichtlinie.pdf"
+}
+```
+
+Errors: `400` wrong type, empty file, file over 20 MB, or a non-persona collection.
+`422` when the file has no indexable text. `502` / `504` provider failures.
+
+### `DELETE /documents`
+
+Remove every chunk whose `source_id` belongs to that persona collection.
+
+```bash
+curl -X DELETE http://localhost:8000/documents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collection": "persona_0123456789abcdef01234567",
+    "source_id": "pdf:…"
+  }'
+```
+
+### `DELETE /collections/{name}`
+
+Drop a managed persona collection after the persona itself is deleted.
+`documents` and other static names return `400`. A missing persona collection
+returns `{ "deleted": false }` so a retry can finish the MongoDB cleanup.

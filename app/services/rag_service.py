@@ -7,6 +7,7 @@ from time import perf_counter
 
 from app.models.schemas import AskResponse, AskSource
 from app.services.retrieval_service import RetrievalResult, RetrievalService
+from app.utils.dedup import similarity, stitch
 
 
 logger = logging.getLogger(__name__)
@@ -65,14 +66,16 @@ class RagService:
         retrieval: RetrievalService,
         top_k: int,
         max_context_chunks: int,
-        retrieval_min_score: float,
         min_rag_hits: int,
+        dedup_similarity_threshold: float,
+        merge_adjacent_chunks: bool,
     ) -> None:
         self.retrieval = retrieval
         self.top_k = top_k
         self.max_context_chunks = max_context_chunks
-        self.retrieval_min_score = retrieval_min_score
         self.min_rag_hits = min_rag_hits
+        self.dedup_similarity_threshold = dedup_similarity_threshold
+        self.merge_adjacent_chunks = merge_adjacent_chunks
 
     async def retrieve(
         self,
@@ -80,15 +83,24 @@ class RagService:
         *,
         collection: str | None = None,
         top_k: int | None = None,
+        language: str | None = None,
     ) -> AskResponse:
         timings = RequestTimings()
         effective_top_k = top_k if top_k and top_k > 0 else self.top_k
 
         db_started = perf_counter()
-        results = await self.retrieval.retrieve(question, effective_top_k, collection)
+        results = await self.retrieval.retrieve(
+            question,
+            effective_top_k,
+            collection,
+            language,
+        )
         timings.db_ms = (perf_counter() - db_started) * 1000
 
-        strong_hits = self._filter_strong_hits(results)
+        # Relevance filtering happens in the retrieval stage now (dense score
+        # threshold, plus the cross-encoder when RERANK_ENABLED is on).
+        strong_hits = self._collapse_overlapping(results)
+
         if len(strong_hits) < self.min_rag_hits:
             self._log_timing(
                 timings=timings,
@@ -98,7 +110,7 @@ class RagService:
             )
             return AskResponse()
 
-        contexts, sources = self._build_contexts_and_sources(
+        contexts, sources, scores = self._build_contexts_and_sources(
             strong_hits,
             limit=min(self.max_context_chunks, effective_top_k),
         )
@@ -108,23 +120,84 @@ class RagService:
             total_hits=len(results),
             context_count=len(contexts),
         )
-        return AskResponse(contexts=contexts, sources=sources)
+        return AskResponse(contexts=contexts, sources=sources, scores=scores)
 
-    def _filter_strong_hits(self, results: list[RetrievalResult]) -> list[RetrievalResult]:
-        return [
-            result
-            for result in results
-            if float(result.get('score', 0.0)) >= self.retrieval_min_score
-        ]
+    def _collapse_overlapping(
+        self,
+        results: list[RetrievalResult],
+    ) -> list[RetrievalResult]:
+        """Fold chunk_overlap duplicates into a single context.
+
+        Neighbouring chunks share up to CHUNK_OVERLAP characters, so a top-k of
+        6 can easily be three renderings of the same passage. Every duplicate
+        costs prompt budget and shows up as its own citation in the answer.
+        """
+        kept: list[RetrievalResult] = []
+
+        for result in results:
+            payload = result['payload']
+            text = str(payload.get('text', '')).strip()
+            if not text:
+                continue
+
+            absorbed = False
+            for existing in kept:
+                existing_payload = existing['payload']
+
+                if self.merge_adjacent_chunks and self._is_adjacent(
+                    existing_payload, payload
+                ):
+                    first, second = sorted(
+                        (existing_payload, payload),
+                        key=lambda item: int(item.get('chunk_idx', 0) or 0),
+                    )
+                    existing_payload['text'] = stitch(
+                        str(first.get('text', '')),
+                        str(second.get('text', '')),
+                    )
+                    absorbed = True
+                    break
+
+                existing_text = str(existing_payload.get('text', ''))
+                if similarity(existing_text, text) >= self.dedup_similarity_threshold:
+                    absorbed = True
+                    break
+
+            if not absorbed:
+                kept.append(result)
+
+        if len(kept) < len(results):
+            logger.info(
+                'collapsed overlapping chunks | in=%d out=%d',
+                len(results),
+                len(kept),
+            )
+        return kept
+
+    @staticmethod
+    def _is_adjacent(left: dict[str, object], right: dict[str, object]) -> bool:
+        if left.get('source_id') != right.get('source_id'):
+            return False
+        if left.get('section_idx') != right.get('section_idx'):
+            return False
+        try:
+            distance = abs(
+                int(left.get('chunk_idx', 0) or 0)
+                - int(right.get('chunk_idx', 0) or 0)
+            )
+        except (TypeError, ValueError):
+            return False
+        return distance == 1
 
     def _build_contexts_and_sources(
         self,
         strong_hits: list[RetrievalResult],
         limit: int,
-    ) -> tuple[list[str], list[AskSource]]:
-        """Keep contexts and sources 1:1 aligned for downstream citation mapping."""
+    ) -> tuple[list[str], list[AskSource], list[float]]:
+        """Keep contexts, sources, and scores 1:1 aligned for citation mapping."""
         contexts: list[str] = []
         sources: list[AskSource] = []
+        scores: list[float] = []
 
         for result in strong_hits[:limit]:
             payload = result['payload']
@@ -133,6 +206,7 @@ class RagService:
             source_url = str(payload.get('source_url', '')).strip()
             source_id = str(payload.get('source_id', '')).strip()
             source_type = str(payload.get('source_type', '')).strip() or 'rag'
+            score = float(result.get('score', 0.0))
 
             if not text:
                 continue
@@ -151,10 +225,12 @@ class RagService:
                     page=_extract_page(title, payload),
                     published_at=_extract_published_at(text, payload),
                     section=title or None,
+                    score=score,
                 )
             )
+            scores.append(score)
 
-        return contexts, sources
+        return contexts, sources, scores
 
     @staticmethod
     def _log_timing(

@@ -73,6 +73,10 @@ class Settings(BaseModel):
     hybrid_prefetch_limit: int
 
     embedding_provider: Literal['openai', 'ollama']
+    embedding_prompt_style: str
+    embedding_batch_size: int
+    embedding_max_parallel_batches: int
+    query_embedding_cache_size: int
     llm_provider: Literal['openai', 'ollama']
     openai_api_key: str | None
     openai_base_url: str | None
@@ -87,8 +91,20 @@ class Settings(BaseModel):
     ollama_timeout_seconds: float
 
     retrieval_top_k: int
-    retrieval_min_score: float
+    retrieval_score_threshold: float
+    retrieval_candidate_multiplier: int
     min_rag_hits: int
+
+    bm25_language: str
+
+    rerank_enabled: bool
+    rerank_model: str
+    rerank_score_threshold: float
+
+    dedup_similarity_threshold: float
+    merge_adjacent_chunks: bool
+
+    upsert_batch_size: int
 
     provider_max_retries: int
     provider_retry_base_delay_seconds: float
@@ -117,7 +133,9 @@ def get_settings() -> Settings:
         qdrant_collection=os.getenv('QDRANT_COLLECTION', 'documents'),
         qdrant_allowed_collections=_parse_list(os.getenv('QDRANT_ALLOWED_COLLECTIONS')),
         qdrant_timeout_seconds=float(os.getenv('QDRANT_TIMEOUT_SECONDS', '20')),
-        document_language=os.getenv('DOCUMENT_LANGUAGE', 'hsb'),
+        # Only used when a document carries no de/hsb signal at all; the
+        # indexer detects the language from the text otherwise.
+        document_language=os.getenv('DOCUMENT_LANGUAGE', 'de'),
         embedding_dimension=int(os.getenv('EMBEDDING_DIMENSION', '768')),
         vector_distance=cast(
             Literal['cosine', 'dot', 'euclid'],
@@ -128,6 +146,13 @@ def get_settings() -> Settings:
             Literal['openai', 'ollama'],
             os.getenv('LLM_EMBEDDING_BACKEND', 'openai'),
         ),
+        # 'gemma' | 'none' | '' (auto-detect from the model name)
+        embedding_prompt_style=os.getenv('EMBEDDING_PROMPT_STYLE', ''),
+        embedding_batch_size=int(os.getenv('EMBEDDING_BATCH_SIZE', '32')),
+        embedding_max_parallel_batches=int(
+            os.getenv('EMBEDDING_MAX_PARALLEL_BATCHES', '4')
+        ),
+        query_embedding_cache_size=int(os.getenv('QUERY_EMBEDDING_CACHE_SIZE', '512')),
         llm_provider=cast(
             Literal['openai', 'ollama'],
             os.getenv('LLM_EMBEDDING_BACKEND', 'openai'),
@@ -143,8 +168,25 @@ def get_settings() -> Settings:
         ollama_chat_model=os.getenv('LLM_EMBEDDING_MODEL', 'qwen3.5:4b'),
         ollama_timeout_seconds=float(os.getenv('OLLAMA_TIMEOUT_SECONDS', '60')),
         retrieval_top_k=int(os.getenv('RETRIEVAL_TOP_K', '6')),
-        retrieval_min_score=float(os.getenv('RETRIEVAL_MIN_SCORE', '0.015')),
+        # Cosine similarity floor applied to the dense candidates. Replaces the
+        # old RETRIEVAL_MIN_SCORE, which filtered RRF fusion scores and was
+        # therefore a rank cutoff rather than a relevance gate.
+        retrieval_score_threshold=float(os.getenv('RETRIEVAL_SCORE_THRESHOLD', '0.4')),
+        retrieval_candidate_multiplier=int(
+            os.getenv('RETRIEVAL_CANDIDATE_MULTIPLIER', '4')
+        ),
         min_rag_hits=int(os.getenv('MIN_RAG_HITS', '1')),
+        bm25_language=os.getenv('BM25_LANGUAGE', 'german'),
+        rerank_enabled=_env_bool('RERANK_ENABLED', False),
+        rerank_model=os.getenv(
+            'RERANK_MODEL', 'jinaai/jina-reranker-v2-base-multilingual'
+        ),
+        rerank_score_threshold=float(os.getenv('RERANK_SCORE_THRESHOLD', '0.0')),
+        dedup_similarity_threshold=float(
+            os.getenv('DEDUP_SIMILARITY_THRESHOLD', '0.85')
+        ),
+        merge_adjacent_chunks=_env_bool('MERGE_ADJACENT_CHUNKS', True),
+        upsert_batch_size=int(os.getenv('UPSERT_BATCH_SIZE', '128')),
         provider_max_retries=int(os.getenv('PROVIDER_MAX_RETRIES', '3')),
         provider_retry_base_delay_seconds=float(
             os.getenv('PROVIDER_RETRY_BASE_DELAY_SECONDS', '0.5')

@@ -18,6 +18,7 @@ async def lifespan(app: FastAPI):
 
     container = ServiceContainer(settings)
     await container.qdrant.ensure_collection()
+    await container.warm_up()
     app.state.container = container
 
     if settings.scheduler_enabled:

@@ -45,38 +45,54 @@ class OllamaEmbeddingProvider:
         self._timeout = settings.ollama_timeout_seconds
         self._max_retries = settings.provider_max_retries
         self._retry_base_delay = settings.provider_retry_base_delay_seconds
+        self._batch_size = max(1, settings.embedding_batch_size)
+        self._max_parallel_batches = max(1, settings.embedding_max_parallel_batches)
         headers: dict[str, str] = {}
         if settings.ollama_api_key:
             headers['Authorization'] = f'Bearer {settings.ollama_api_key}'
         self._client = httpx.AsyncClient(timeout=self._timeout, headers=headers)
 
     async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
-        semaphore = asyncio.Semaphore(8)
+        items = list(texts)
+        if not items:
+            return []
 
-        async def _limited(text: str) -> list[float]:
+        batches = [
+            items[start : start + self._batch_size]
+            for start in range(0, len(items), self._batch_size)
+        ]
+        semaphore = asyncio.Semaphore(self._max_parallel_batches)
+
+        async def _limited(batch: list[str]) -> list[list[float]]:
             async with semaphore:
-                return await self._embed_one(text)
+                return await self._embed_batch(batch)
 
-        return list(await asyncio.gather(*(_limited(text) for text in texts)))
+        results = await asyncio.gather(*(_limited(batch) for batch in batches))
+        return [vector for batch_result in results for vector in batch_result]
+
     async def embed_query(self, text: str) -> list[float]:
         vectors = await self.embed_texts([text])
         return vectors[0]
 
-    async def _embed_one(self, text: str) -> list[float]:
-        async def _call() -> list[float]:
+    async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        async def _call() -> list[list[float]]:
+            # /api/embed supersedes /api/embeddings and accepts an array,
+            # turning one request per chunk into one request per batch.
             response = await self._client.post(
-                f'{self._base_url}/api/embeddings',
+                f'{self._base_url}/api/embed',
                 json={
                     'model': self._model,
-                    'prompt': text,
+                    'input': batch,
                 },
             )
             response.raise_for_status()
             data = response.json()
-            embedding = data.get('embedding')
-            if not isinstance(embedding, list) or not embedding:
-                raise ValueError('Ollama embedding response missing embedding vector')
-            return [float(value) for value in embedding]
+            embeddings = data.get('embeddings')
+            if not isinstance(embeddings, list) or len(embeddings) != len(batch):
+                raise ValueError(
+                    'Ollama embedding response did not return one vector per input'
+                )
+            return [[float(value) for value in vector] for vector in embeddings]
 
         return await _run_with_ollama_retry(
             _call,

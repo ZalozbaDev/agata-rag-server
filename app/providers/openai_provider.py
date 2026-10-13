@@ -56,12 +56,28 @@ class OpenAIEmbeddingProvider:
         self._model = settings.openai_embedding_model
         self._max_retries = settings.provider_max_retries
         self._retry_base_delay = settings.provider_retry_base_delay_seconds
+        self._batch_size = max(1, settings.embedding_batch_size)
 
     async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        items = list(texts)
+        if not items:
+            return []
+
+        vectors: list[list[float]] = []
+        # Keep requests below the per-request input limit for large documents.
+        for start in range(0, len(items), self._batch_size):
+            vectors.extend(await self._embed_batch(items[start : start + self._batch_size]))
+        return vectors
+
+    async def embed_query(self, text: str) -> list[float]:
+        vectors = await self.embed_texts([text])
+        return vectors[0]
+
+    async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
         async def _call() -> list[list[float]]:
             response = await self._client.embeddings.create(
                 model=self._model,
-                input=list(texts),
+                input=batch,
             )
             return [item.embedding for item in response.data]
 
@@ -71,7 +87,3 @@ class OpenAIEmbeddingProvider:
             retry_base_delay=self._retry_base_delay,
             error_message='OpenAI embedding request failed',
         )
-
-    async def embed_query(self, text: str) -> list[float]:
-        vectors = await self.embed_texts([text])
-        return vectors[0]

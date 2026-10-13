@@ -15,13 +15,25 @@ from app.models.schemas import (
     AskResponse,
     CollectionInfo,
     CollectionsResponse,
+    DeleteCollectionResponse,
+    DeleteDocumentRequest,
+    DeleteDocumentResponse,
+    DocumentUploadResponse,
     HealthResponse,
     ParsedSection,
     ParseUrlRequest,
 )
+from app.services.persona_documents import (
+    MAX_UPLOAD_BYTES,
+    UnsupportedDocumentTypeError,
+    classify_upload,
+    is_persona_collection,
+    source_id_for_upload,
+)
 from app.parsers.adapters import FetchError, InvalidUrlError
 from app.parsers.pdf_parser import InvalidPdfError
 from app.utils.hashing import stable_sha256
+from app.utils.language import UnknownLanguageError, resolve_document_language
 
 router = APIRouter()
 
@@ -270,6 +282,27 @@ async def _maybe_store_sections(
         )
     except UnknownCollectionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UnknownLanguageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _apply_language(
+    sections: list[ParsedSection],
+    requested: str | None,
+    default: str,
+) -> str:
+    try:
+        resolved = resolve_document_language(
+            requested,
+            [section.text for section in sections],
+            default=default,
+        )
+    except UnknownLanguageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    for section in sections:
+        section.language = resolved
+    return resolved
 
 
 @router.post('/parsePdf', response_model=list[ParsedSection])
@@ -291,6 +324,11 @@ async def parse_pdf(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         source_seed = file_name or raw[:256]
+        resolved_language = _apply_language(
+            file_sections,
+            parse_input.language,
+            container.settings.document_language,
+        )
         await _maybe_store_sections(
             container,
             store_in_db=parse_input.store_in_db,
@@ -299,7 +337,7 @@ async def parse_pdf(
             sections=file_sections,
             source_url=file_name,
             collection=parse_input.collection,
-            language=parse_input.language,
+            language=resolved_language,
         )
         sections.extend(file_sections)
 
@@ -319,6 +357,11 @@ async def parse_html(
     )
 
     source_seed = parse_input.source_url or parse_input.file_name or parse_input.html[:256]
+    resolved_language = _apply_language(
+        sections,
+        parse_input.language,
+        container.settings.document_language,
+    )
     await _maybe_store_sections(
         container,
         store_in_db=parse_input.store_in_db,
@@ -327,7 +370,7 @@ async def parse_html(
         sections=sections,
         source_url=parse_input.source_url,
         collection=parse_input.collection,
-        language=parse_input.language,
+        language=resolved_language,
     )
     return sections
 
@@ -346,6 +389,11 @@ async def parse_url_post(
         status = 504 if exc.is_timeout else 502
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
+    resolved_language = _apply_language(
+        sections,
+        request.language,
+        container.settings.document_language,
+    )
     await _maybe_store_sections(
         container,
         store_in_db=request.store_in_db,
@@ -354,7 +402,7 @@ async def parse_url_post(
         sections=sections,
         source_url=url,
         collection=request.collection,
-        language=request.language,
+        language=resolved_language,
     )
     return sections
 
@@ -369,6 +417,7 @@ async def ask(
             request.question,
             collection=request.collection,
             top_k=request.top_k,
+            language=request.language,
         )
     except UnknownCollectionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -379,3 +428,175 @@ async def ask(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail='Unexpected server error') from exc
+
+
+def _require_persona_collection(collection: str | None) -> str:
+    name = (collection or '').strip()
+    if not is_persona_collection(name):
+        raise HTTPException(
+            status_code=400,
+            detail='A managed persona collection (persona_<id>) is required',
+        )
+    return name
+
+
+@router.post('/documents', response_model=DocumentUploadResponse)
+async def upload_document(
+    request: Request,
+    container: ServiceContainer = Depends(get_container),
+) -> DocumentUploadResponse:
+    """Index one PDF or HTML file into a single persona collection."""
+    content_type = request.headers.get('content-type', '')
+    if 'multipart/form-data' not in content_type:
+        raise HTTPException(
+            status_code=400,
+            detail='Expected multipart/form-data with one file',
+        )
+
+    form = await request.form()
+    uploads = _collect_uploads(form)
+    if len(uploads) != 1:
+        raise HTTPException(status_code=400, detail='Exactly one file is required')
+
+    upload = uploads[0]
+    filename = (upload.filename or 'upload').strip() or 'upload'
+    raw = await upload.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail='Empty file')
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail='File exceeds 20 MB')
+
+    try:
+        kind = classify_upload(filename, upload.content_type)
+    except UnsupportedDocumentTypeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Unsupported file type: {exc}',
+        ) from exc
+
+    collection = _require_persona_collection(
+        _optional_str(
+            _first_present(form.get('collection'), request.query_params.get('collection'))
+        )
+    )
+    language = _optional_str(
+        _first_present(form.get('language'), request.query_params.get('language'))
+    )
+    min_chars = _parse_int_param(
+        _first_present(form.get('min_chars'), request.query_params.get('min_chars')),
+        field_name='min_chars',
+    )
+
+    if kind == 'pdf':
+        try:
+            sections = await container.parser_service.parse_pdf(
+                raw,
+                source_hint=filename,
+                min_chars=min_chars,
+            )
+        except InvalidPdfError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        source_type = 'pdf_upload'
+    else:
+        html = raw.decode('utf-8', errors='ignore').strip()
+        if not html:
+            raise HTTPException(status_code=400, detail='Missing HTML content')
+        sections = await container.parser_service.parse_html(
+            html,
+            source_hint=filename,
+            min_chars=min_chars,
+        )
+        source_type = 'html_upload'
+
+    if not sections:
+        raise HTTPException(
+            status_code=422,
+            detail='Document produced no indexable text',
+        )
+
+    source_id = source_id_for_upload(kind, filename, raw)
+    resolved_language = _apply_language(
+        sections,
+        language,
+        container.settings.document_language,
+    )
+    try:
+        chunk_count = await container.indexing_service.store_sections(
+            source_id=source_id,
+            source_type=source_type,
+            sections=sections,
+            source_url=filename,
+            collection=collection,
+            language=resolved_language,
+        )
+    except UnknownCollectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UnknownLanguageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ProviderError as exc:
+        status = 504 if exc.is_timeout else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    if chunk_count < 1:
+        raise HTTPException(
+            status_code=422,
+            detail='Document produced no indexable text',
+        )
+
+    return DocumentUploadResponse(
+        source_id=source_id,
+        collection=collection,
+        section_count=len(sections),
+        chunk_count=chunk_count,
+        filename=filename,
+    )
+
+
+@router.delete('/documents', response_model=DeleteDocumentResponse)
+async def delete_document(
+    body: DeleteDocumentRequest,
+    container: ServiceContainer = Depends(get_container),
+) -> DeleteDocumentResponse:
+    """Remove every chunk of one source from one persona collection."""
+    collection = _require_persona_collection(body.collection)
+    source_id = body.source_id.strip()
+    if not source_id:
+        raise HTTPException(status_code=400, detail='source_id is required')
+
+    try:
+        if not await container.qdrant.collection_exists(collection):
+            return DeleteDocumentResponse(
+                deleted=True,
+                collection=collection,
+                source_id=source_id,
+            )
+        await container.qdrant.delete_by_source_id(collection, source_id)
+    except UnknownCollectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ProviderError as exc:
+        status = 504 if exc.is_timeout else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    return DeleteDocumentResponse(
+        deleted=True,
+        collection=collection,
+        source_id=source_id,
+    )
+
+
+@router.delete('/collections/{name}', response_model=DeleteCollectionResponse)
+async def delete_collection(
+    name: str,
+    container: ServiceContainer = Depends(get_container),
+) -> DeleteCollectionResponse:
+    """Drop a managed persona collection. Static collections are rejected."""
+    collection = _require_persona_collection(name)
+    try:
+        deleted = await container.qdrant.delete_collection_if_exists(collection)
+    except UnknownCollectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ProviderError as exc:
+        status = 504 if exc.is_timeout else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    return DeleteCollectionResponse(deleted=deleted, collection=collection)

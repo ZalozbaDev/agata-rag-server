@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 
 COLLECTION_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_\-]{0,62}$')
+# Managed personas get their own collection. These names stay allowed even
+# when QDRANT_ALLOWED_COLLECTIONS is set, so a typo allowlist cannot block
+# them and they still cannot collide with the static persona collections.
+PERSONA_COLLECTION_RE = re.compile(r'^persona_[a-f0-9]{24}$')
 
 
 class UnknownCollectionError(ValueError):
@@ -74,7 +78,12 @@ class QdrantGateway:
             raise UnknownCollectionError(f'Invalid collection name: {collection!r}')
 
         allowed = self.settings.qdrant_allowed_collections
-        if allowed and name not in allowed and name != self.settings.qdrant_collection:
+        if (
+            allowed
+            and name not in allowed
+            and name != self.settings.qdrant_collection
+            and not PERSONA_COLLECTION_RE.match(name)
+        ):
             raise UnknownCollectionError(f'Unknown collection: {name}')
 
         return name
@@ -158,10 +167,15 @@ class QdrantGateway:
                         exc,
                     )
 
+    async def collection_exists(self, collection: str) -> bool:
+        name = self.resolve_collection(collection)
+        return bool(await self._call(lambda: self.client.collection_exists(name)))
+
     async def delete_by_source_id(self, collection: str, source_id: str) -> None:
+        name = self.resolve_collection(collection)
         await self._call(
             lambda: self.client.delete(
-                collection_name=collection,
+                collection_name=name,
                 points_selector=models.FilterSelector(
                     filter=models.Filter(
                         must=[
@@ -175,6 +189,16 @@ class QdrantGateway:
                 wait=True,
             )
         )
+
+    async def delete_collection_if_exists(self, collection: str) -> bool:
+        name = self.resolve_collection(collection)
+        exists = await self._call(lambda: self.client.collection_exists(name))
+        if not exists:
+            self._ensured_collections.discard(name)
+            return False
+        await self._call(lambda: self.client.delete_collection(name))
+        self._ensured_collections.discard(name)
+        return True
 
     async def list_collections(self) -> list[dict[str, object]]:
         response = await self._call(self.client.get_collections)
@@ -193,20 +217,64 @@ class QdrantGateway:
 
         return sorted(summaries, key=lambda item: str(item['name']))
 
+    async def fetch_point_ids(self, collection: str, source_id: str) -> set[str]:
+        """Point ids currently stored for a source, used to skip unchanged chunks."""
+        found: set[str] = set()
+        offset: object = None
+
+        while True:
+            points, offset = await self._call(
+                lambda current=offset: self.client.scroll(
+                    collection_name=collection,
+                    scroll_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key='source_id',
+                                match=models.MatchValue(value=source_id),
+                            )
+                        ]
+                    ),
+                    limit=512,
+                    offset=current,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+            )
+            found.update(str(point.id) for point in points)
+            if offset is None:
+                break
+
+        return found
+
+    async def delete_points(self, collection: str, point_ids: list[str]) -> None:
+        if not point_ids:
+            return
+        await self._call(
+            lambda: self.client.delete(
+                collection_name=collection,
+                points_selector=models.PointIdsList(points=list(point_ids)),
+                wait=True,
+            )
+        )
+
     async def upsert_chunks(
         self,
         collection: str,
         points: list[models.PointStruct],
+        batch_size: int = 128,
     ) -> None:
         if not points:
             return
-        await self._call(
-            lambda: self.client.upsert(
-                collection_name=collection,
-                points=points,
-                wait=True,
+        size = max(1, batch_size)
+        for start in range(0, len(points), size):
+            batch = points[start : start + size]
+            await self._call(
+                lambda current=batch: self.client.upsert(
+                    collection_name=collection,
+                    points=current,
+                    wait=True,
+                )
             )
-        )
 
     async def hybrid_search(
         self,
@@ -216,25 +284,37 @@ class QdrantGateway:
         sparse_vector: models.SparseVector,
         limit: int,
         prefetch_limit: int,
+        dense_score_threshold: float | None = None,
     ) -> list[models.ScoredPoint]:
+        prefetch = [
+            # Only the dense branch gets a threshold: cosine is bounded and
+            # comparable across queries, BM25 scores are not.
+            models.Prefetch(
+                query=dense_vector,
+                using=DENSE_VECTOR_NAME,
+                limit=prefetch_limit,
+                score_threshold=dense_score_threshold,
+            )
+        ]
+        if sparse_vector.indices:
+            prefetch.append(
+                models.Prefetch(
+                    query=sparse_vector,
+                    using=SPARSE_VECTOR_NAME,
+                    limit=prefetch_limit,
+                )
+            )
+
         result = await self._call(
             lambda: self.client.query_points(
                 collection_name=collection,
-                prefetch=[
-                    models.Prefetch(
-                        query=dense_vector,
-                        using=DENSE_VECTOR_NAME,
-                        limit=prefetch_limit,
-                    ),
-                    models.Prefetch(
-                        query=sparse_vector,
-                        using=SPARSE_VECTOR_NAME,
-                        limit=prefetch_limit,
-                    ),
-                ],
+                prefetch=prefetch,
                 query=models.FusionQuery(fusion=models.Fusion.RRF),
                 limit=limit,
                 with_payload=True,
+                # Needed to score every candidate semantically, including the
+                # ones that only the sparse branch surfaced.
+                with_vectors=[DENSE_VECTOR_NAME],
             )
         )
         return result.points
